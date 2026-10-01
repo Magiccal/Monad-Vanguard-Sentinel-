@@ -128,6 +128,7 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, rpc = nul
           if (!rpc) throw new DomainError(503, 'rpc_not_configured', 'RPC_URL is not configured');
           const target = sentinel.getActiveWatchTarget(id);
           const observation = await inspectWatchTarget(target, rpc);
+          if (observation.state === 'up_to_date') return respond(res, 200, observation);
           return respond(res, 200, await sentinel.recordWatchObservation(id, reviewerId, observation));
         }
         if (segments[3] === 'archive') {

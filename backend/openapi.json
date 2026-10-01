@@ -180,12 +180,13 @@
     },
     "/v1/watchlist/{id}/check": {
       "post": {
-        "summary": "Check event logs emitted by the address in the last 100 blocks",
-        "description": "Read-only, manual snapshot; no threat classification or automatic polling.",
+        "summary": "Continue a manual event-log scan from the saved block cursor",
+        "description": "The first check scans up to the latest 100 blocks. Later checks continue after the saved cursor, scanning at most 500 blocks per call in smaller RPC requests. A response with hasMore=true means another check is needed. No threat classification or automatic polling occurs. Recent logs are deduplicated by block hash and log index; chain reorganization reconciliation is not implemented.",
         "security": [{ "ReviewerBearer": [] }],
         "parameters": [{ "$ref": "#/components/parameters/WatchTargetId" }],
         "responses": {
-          "200": { "description": "Recorded log observation", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WatchObservation" } } } },
+          "200": { "description": "Recorded scan or up-to-date result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WatchObservation" } } } },
+          "409": { "$ref": "#/components/responses/Error" },
           "502": { "$ref": "#/components/responses/Error" },
           "503": { "$ref": "#/components/responses/Error" }
         }
@@ -387,14 +388,27 @@
         }
       },
       "WatchObservation": {
-        "type": "object", "required": ["observedAt", "chainId", "fromBlock", "toBlock", "logCount", "samples"],
+        "type": "object", "required": ["state", "observedAt", "chainId", "fromBlock", "toBlock", "latestBlock", "hasMore", "logCount", "duplicateCount", "samples"],
         "properties": {
+          "state": { "enum": ["scanned", "up_to_date"] },
           "observedAt": { "type": "string", "format": "date-time" },
           "chainId": { "type": "integer" },
-          "fromBlock": { "type": "string" },
+          "fromBlock": { "type": ["string", "null"], "description": "Null when no new blocks are available" },
           "toBlock": { "type": "string" },
+          "latestBlock": { "type": "string" },
+          "hasMore": { "type": "boolean" },
           "logCount": { "type": "integer", "minimum": 0 },
-          "samples": { "type": "array", "maxItems": 20, "items": { "type": "object" } }
+          "duplicateCount": { "type": "integer", "minimum": 0 },
+          "samples": { "type": "array", "maxItems": 20, "items": {
+            "type": "object", "required": ["txHash", "blockNumber", "blockHash", "logIndex", "topic0"],
+            "properties": {
+              "txHash": { "type": "string" },
+              "blockNumber": { "type": "string" },
+              "blockHash": { "type": "string" },
+              "logIndex": { "type": "string" },
+              "topic0": { "type": ["string", "null"] }
+            }
+          } }
         }
       },
       "WatchTarget": {
@@ -407,6 +421,7 @@
               "createdBy": { "type": "string" },
               "createdAt": { "type": "string", "format": "date-time" },
               "updatedAt": { "type": "string", "format": "date-time" },
+              "lastScannedBlock": { "type": ["string", "null"] },
               "observations": { "type": "array", "items": { "$ref": "#/components/schemas/WatchObservation" } },
               "archived": { "type": ["object", "null"] }
             }

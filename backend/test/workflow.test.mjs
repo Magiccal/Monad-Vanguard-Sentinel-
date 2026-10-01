@@ -97,16 +97,25 @@ test('watchlist prevents duplicate active targets and preserves archived observa
   const target = await sentinel.addWatchTarget('reviewer', input);
   await assert.rejects(sentinel.addWatchTarget('reviewer', input), { code: 'duplicate_watch_target' });
   await sentinel.recordWatchObservation(target.id, 'reviewer', {
-    observedAt: '2026-09-28T12:00:00.000Z', chainId: 10143,
-    fromBlock: '0x1', toBlock: '0x2', logCount: 0, samples: [],
+    state: 'scanned', observedAt: '2026-09-28T12:00:00.000Z', chainId: 10143,
+    previousBlock: null, fromBlock: '0x1', toBlock: '0x2', latestBlock: '0x2',
+    hasMore: false, logCount: 0, duplicateCount: 0, samples: [], logKeys: [],
   });
+  assert.equal(sentinel.listWatchTargets()[0].lastScannedBlock, '0x2');
+  await assert.rejects(sentinel.recordWatchObservation(target.id, 'reviewer', {
+    state: 'scanned', observedAt: '2026-09-28T12:00:01.000Z', chainId: 10143,
+    previousBlock: null, fromBlock: '0x1', toBlock: '0x2', latestBlock: '0x2',
+    hasMore: false, logCount: 0, duplicateCount: 0, samples: [], logKeys: [],
+  }), { code: 'stale_watch_check' });
   await sentinel.archiveWatchTarget(target.id, 'reviewer', {
     reason: 'This fictional target is no longer needed for the local demonstration.',
   });
   assert.equal(sentinel.listWatchTargets()[0].active, false);
   assert.equal(sentinel.listWatchTargets()[0].observations.length, 1);
   await assert.rejects(sentinel.recordWatchObservation(target.id, 'reviewer', {
-    observedAt: '2026-09-28T12:01:00.000Z', chainId: 10143,
+    state: 'scanned', observedAt: '2026-09-28T12:01:00.000Z', chainId: 10143,
+    previousBlock: '0x2', fromBlock: '0x3', toBlock: '0x3', latestBlock: '0x3',
+    hasMore: false, logCount: 0, duplicateCount: 0, samples: [], logKeys: [],
   }), { code: 'watch_target_archived' });
 });
 
@@ -159,8 +168,14 @@ test('file store preserves reports across restart', async () => {
     const file = join(directory, 'state.json');
     const first = createSentinel(await Store.open(file));
     const { id } = await first.submit(reportInput());
-    await first.addWatchTarget('reviewer', {
+    const savedTarget = await first.addWatchTarget('reviewer', {
       chainId: 10143, address: '0x1111111111111111111111111111111111111111', label: 'Persisted demo target',
+    });
+    await first.recordWatchObservation(savedTarget.id, 'reviewer', {
+      state: 'scanned', observedAt: '2026-10-01T00:00:00.000Z', chainId: 10143,
+      previousBlock: null, fromBlock: '0x1', toBlock: '0x2', latestBlock: '0x2',
+      hasMore: false, logCount: 1, duplicateCount: 0, samples: [],
+      logKeys: [`0x${'c'.repeat(64)}:1`],
     });
     await first.startReview(id, 'reviewer');
     await first.decide(id, 'reviewer', {
@@ -173,6 +188,8 @@ test('file store preserves reports across restart', async () => {
     assert.equal(second.getReport(id).status, 'verified');
     assert.equal(second.getReport(id).evidence.length, 1);
     assert.equal(second.listWatchTargets().length, 1);
+    assert.equal(second.listWatchTargets()[0].lastScannedBlock, '0x2');
+    assert.equal(second.listWatchTargets()[0].recentLogKeys.length, 1);
     assert.equal(second.listNotificationEvents().length, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -257,6 +274,13 @@ test('HTTP API protects reviewer data and publishes only verified reports', asyn
     chainId: 10143, address: '0x1111111111111111111111111111111111111111', label: 'Demo target',
   }, auth);
   assert.equal(watch.status, 201);
-  assert.equal((await invoke('POST', `/v1/watchlist/${watch.body.id}/check`, undefined, auth)).body.logCount, 0);
-  assert.equal((await invoke('GET', '/v1/watchlist', undefined, auth)).body.targets.length, 1);
+  const firstCheck = await invoke('POST', `/v1/watchlist/${watch.body.id}/check`, undefined, auth);
+  assert.equal(firstCheck.body.state, 'scanned');
+  assert.equal(firstCheck.body.logCount, 0);
+  const secondCheck = await invoke('POST', `/v1/watchlist/${watch.body.id}/check`, undefined, auth);
+  assert.equal(secondCheck.body.state, 'up_to_date');
+  const targets = (await invoke('GET', '/v1/watchlist', undefined, auth)).body.targets;
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].lastScannedBlock, '0x100');
+  assert.equal(targets[0].observations.length, 1);
 });

@@ -1,0 +1,14 @@
+{
+  "reporterId": "demo-community-member",
+  "chainId": 10143,
+  "contractAddress": "0x1111111111111111111111111111111111111111",
+  "title": "Demo: suspicious contract activity",
+  "description": "A fictional report used to demonstrate the review workflow. No real contract is accused.",
+  "evidence": [
+    {
+      "kind": "transaction",
+      "txHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "note": "Fictional transaction hash used only for API integration testing."
+    }
+  ]
+}

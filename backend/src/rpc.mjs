@@ -97,9 +97,13 @@ export async function inspectTransactionEvidence(report, rpc, { now = () => new 
   return { observedAt: now(), chainId: rpcChainId, findings };
 }
 
-export async function inspectWatchTarget(target, rpc, { now = () => new Date().toISOString(), lookback = 100 } = {}) {
-  if (!Number.isSafeInteger(lookback) || lookback < 1 || lookback > 1000) {
-    throw new Error('lookback must be 1-1000 blocks');
+export async function inspectWatchTarget(target, rpc, {
+  now = () => new Date().toISOString(), lookback = 100, maxBlocksPerCheck = 500, chunkSize = 100,
+} = {}) {
+  if (!Number.isSafeInteger(lookback) || lookback < 1 || lookback > 1000 ||
+      !Number.isSafeInteger(maxBlocksPerCheck) || maxBlocksPerCheck < 1 || maxBlocksPerCheck > 2000 ||
+      !Number.isSafeInteger(chunkSize) || chunkSize < 1 || chunkSize > 1000) {
+    throw new Error('Invalid watch scan range');
   }
   const chainId = await assertChain(target.chainId, rpc);
   const latestHex = await rpc.call('eth_blockNumber');
@@ -107,24 +111,64 @@ export async function inspectWatchTarget(target, rpc, { now = () => new Date().t
     rpcError('rpc_error', 'RPC returned an invalid block number');
   }
   const latest = BigInt(latestHex);
-  const from = latest >= BigInt(lookback - 1) ? latest - BigInt(lookback - 1) : 0n;
-  const fromBlock = `0x${from.toString(16)}`;
-  const logs = await rpc.call('eth_getLogs', [{
-    address: target.address, fromBlock, toBlock: latestHex,
-  }]);
-  if (!Array.isArray(logs) || logs.length > 1000 || logs.some((log) =>
-    !log || typeof log !== 'object' || typeof log.address !== 'string' ||
-    log.address.toLowerCase() !== target.address ||
-    typeof log.transactionHash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(log.transactionHash) ||
-    typeof log.blockNumber !== 'string' || !/^0x[0-9a-fA-F]+$/.test(log.blockNumber))) {
-    rpcError('rpc_error', 'RPC returned invalid or excessive logs');
+  const previousBlock = target.lastScannedBlock ?? target.observations?.at(-1)?.toBlock ?? null;
+  if (previousBlock !== null && (typeof previousBlock !== 'string' || !/^0x[0-9a-fA-F]+$/.test(previousBlock))) {
+    rpcError('rpc_error', 'Stored watch cursor is invalid');
+  }
+  const previous = previousBlock === null ? null : BigInt(previousBlock);
+  if (previous !== null && previous >= latest) {
+    return {
+      state: 'up_to_date', observedAt: now(), chainId, previousBlock,
+      fromBlock: null, toBlock: previousBlock, latestBlock: latestHex,
+      hasMore: false, logCount: 0, duplicateCount: 0, samples: [],
+    };
+  }
+
+  const from = previous === null
+    ? (latest >= BigInt(lookback - 1) ? latest - BigInt(lookback - 1) : 0n)
+    : previous + 1n;
+  const to = from + BigInt(maxBlocksPerCheck - 1) < latest ? from + BigInt(maxBlocksPerCheck - 1) : latest;
+  const seen = new Set(target.recentLogKeys ?? []);
+  const logKeys = [];
+  const samples = [];
+  let duplicateCount = 0;
+  for (let start = from; start <= to; start += BigInt(chunkSize)) {
+    const end = start + BigInt(chunkSize - 1) < to ? start + BigInt(chunkSize - 1) : to;
+    const logs = await rpc.call('eth_getLogs', [{
+      address: target.address,
+      fromBlock: `0x${start.toString(16)}`,
+      toBlock: `0x${end.toString(16)}`,
+    }]);
+    if (!Array.isArray(logs) || logs.length > 1000) rpcError('rpc_error', 'RPC returned invalid or excessive logs');
+    for (const log of logs) {
+      if (!log || typeof log !== 'object' || typeof log.address !== 'string' ||
+          log.address.toLowerCase() !== target.address ||
+          typeof log.transactionHash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(log.transactionHash) ||
+          typeof log.blockHash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(log.blockHash) ||
+          typeof log.logIndex !== 'string' || !/^0x[0-9a-fA-F]+$/.test(log.logIndex) ||
+          typeof log.blockNumber !== 'string' || !/^0x[0-9a-fA-F]+$/.test(log.blockNumber) ||
+          BigInt(log.blockNumber) < start || BigInt(log.blockNumber) > end) {
+        rpcError('rpc_error', 'RPC returned an invalid log');
+      }
+      if (log.removed === true) rpcError('rpc_error', 'RPC returned a removed log; retry the check');
+      const key = `${log.blockHash.toLowerCase()}:${BigInt(log.logIndex).toString(16)}`;
+      if (seen.has(key)) {
+        duplicateCount++;
+        continue;
+      }
+      seen.add(key);
+      logKeys.push(key);
+      if (samples.length < 20) samples.push({
+        txHash: log.transactionHash.toLowerCase(), blockNumber: log.blockNumber,
+        blockHash: log.blockHash.toLowerCase(), logIndex: log.logIndex,
+        topic0: typeof log.topics?.[0] === 'string' ? log.topics[0] : null,
+      });
+    }
   }
   return {
-    observedAt: now(), chainId, fromBlock, toBlock: latestHex,
-    logCount: logs.length,
-    samples: logs.slice(0, 20).map((log) => ({
-      txHash: log.transactionHash.toLowerCase(), blockNumber: log.blockNumber,
-      topic0: typeof log.topics?.[0] === 'string' ? log.topics[0] : null,
-    })),
+    state: 'scanned', observedAt: now(), chainId, previousBlock,
+    fromBlock: `0x${from.toString(16)}`, toBlock: `0x${to.toString(16)}`,
+    latestBlock: latestHex, hasMore: to < latest,
+    logCount: logKeys.length, duplicateCount, samples, logKeys,
   };
 }

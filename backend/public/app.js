@@ -200,15 +200,16 @@ function watchTargetCard(target) {
   head.append(node('h3', target.label), node('span', target.active ? '监看中' : '已归档', `status ${target.active ? 'verified' : 'retracted'}`));
   card.append(head, node('p', `链 ${target.chainId} · ${target.address}`));
   const last = target.observations.at(-1);
-  if (last) card.append(node('p', `最近观察：${time(last.observedAt)}，区块 ${last.fromBlock}–${last.toBlock}，${last.logCount} 条事件日志。`));
+  if (last) card.append(node('p', `最近观察：${time(last.observedAt)}，区块 ${last.fromBlock}–${last.toBlock}，${last.logCount} 条新事件日志${last.hasMore ? '；仍有后续区块待检查' : ''}。`));
   if (target.archived) card.append(node('p', `归档理由：${target.archived.reason}`));
   if (target.active) {
     const check = node('button', '检查事件日志', 'button subtle');
     check.type = 'button';
     check.addEventListener('click', async () => {
       try {
-        await request(`/v1/watchlist/${target.id}/check`, { method: 'POST', reviewer: true });
-        showFeedback('watch-feedback', '只读检查已记录');
+        const result = await request(`/v1/watchlist/${target.id}/check`, { method: 'POST', reviewer: true });
+        showFeedback('watch-feedback', result.state === 'up_to_date' ? '目前没有新区块需要检查' :
+          `已扫描区块 ${result.fromBlock}–${result.toBlock}，发现 ${result.logCount} 条新日志${result.hasMore ? '；请再次检查以继续追上链头' : ''}`);
         await refreshWatchlist();
       } catch (error) { showFeedback('watch-feedback', error.message, true); }
     });

@@ -81,7 +81,7 @@
       <section class="workspace support-panels" aria-label="辅助审核工具">
         <div class="panel">
           <div class="panel-heading"><div><p class="eyebrow">ONCHAIN WATCHLIST</p><h2>地址监看</h2></div><button type="button" id="load-watchlist" class="button subtle">刷新</button></div>
-          <p class="hint">手动查询合约最近 100 个区块发出的事件日志。日志数量不是风险评分，也不代表没有日志就安全。</p>
+          <p class="hint">首次查询最近 100 个区块，之后从保存的区块继续；每次最多推进 500 个区块，未追上链头时可再次检查。日志数量不是风险评分，也不代表没有日志就安全。</p>
           <form id="watch-form" class="form-grid">
             <label>链 ID<input name="chainId" type="number" min="1" step="1" required></label>
             <label>标签<input name="label" required minlength="2" maxlength="120"></label>

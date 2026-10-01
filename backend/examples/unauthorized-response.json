@@ -1,0 +1,4 @@
+{
+  "error": "unauthorized",
+  "message": "Reviewer bearer token required"
+}

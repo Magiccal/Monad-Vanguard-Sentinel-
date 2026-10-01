@@ -349,7 +349,7 @@ export function createSentinel(store, { now = () => new Date().toISOString() } =
         const target = {
           id: randomUUID(), chainId: data.chainId, address: targetAddress, label,
           active: true, createdBy: actor, createdAt: at, updatedAt: at,
-          observations: [], archived: null,
+          observations: [], lastScannedBlock: null, recentLogKeys: [], archived: null,
         };
         state.watchlist.push(target);
         return target;
@@ -373,10 +373,20 @@ export function createSentinel(store, { now = () => new Date().toISOString() } =
       return store.update((state) => {
         const target = findWatchTarget(state, id);
         if (!target.active) fail(409, 'watch_target_archived', 'Watch target is archived');
-        target.observations.push(structuredClone(observation));
+        if (observation?.state !== 'scanned' || !Array.isArray(observation.logKeys)) {
+          fail(400, 'invalid_input', 'A completed watch scan is required');
+        }
+        const currentBlock = target.lastScannedBlock ?? target.observations.at(-1)?.toBlock ?? null;
+        if (currentBlock !== observation.previousBlock) {
+          fail(409, 'stale_watch_check', 'Watch target changed during the RPC check; retry');
+        }
+        const { logKeys, previousBlock, ...savedObservation } = observation;
+        target.observations.push(structuredClone(savedObservation));
+        target.lastScannedBlock = observation.toBlock;
+        target.recentLogKeys = [...new Set([...(target.recentLogKeys ?? []), ...logKeys])].slice(-1000);
         target.updatedAt = observation.observedAt;
         target.lastCheckedBy = actor;
-        return observation;
+        return savedObservation;
       });
     },
 

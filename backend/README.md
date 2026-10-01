@@ -2,7 +2,7 @@
 
 This Node.js 20 backend is a working prototype for the team's incident and verification layer. It demonstrates one case: a community report about a suspicious contract. Reports stay private until a reviewer makes a manual publication decision. Read-only Monad RPC checks provide transaction facts; they do not determine whether a contract is malicious.
 
-The team interface draft is in [`openapi.json`](openapi.json). The proposed repository boundaries are documented in [`docs/architecture.md`](../docs/architecture.md), and the current review flow is in [`docs/verification.md`](../docs/verification.md).
+The team interface draft is in [`openapi.json`](openapi.json), with ready-to-use fictional payloads in [`examples/`](examples/README.md). The proposed repository boundaries are documented in [`docs/architecture.md`](../docs/architecture.md), and the current review flow is in [`docs/verification.md`](../docs/verification.md).
 
 ## Run locally
 
@@ -35,7 +35,7 @@ submitted / informational
 - The assigned reviewer can add evidence and record a decision with a reason. Publication also requires action advice and explicit `publicEvidenceIds`; only selected evidence appears in public alerts.
 - Reporter and evidence contributor identities remain in reviewer responses. Unselected evidence and its onchain observations remain private.
 - Published alerts have history, corrections, and retractions. Publication, correction, and retraction create local notification drafts; no Telegram, Discord, or user delivery occurs.
-- A reviewer can manually inspect transaction receipts and recent logs from watchlisted addresses. These observations never assign a risk verdict.
+- A reviewer can manually inspect transaction receipts and logs from watchlisted addresses. The first watch check covers the latest 100 blocks; later checks resume after the saved block, advancing at most 500 blocks per request. Repeated logs are deduplicated by block hash and log index. These observations never assign a risk verdict.
 - Contributor counts use self-declared reporter labels. They are not identity verification or a reputation score.
 
 ## Integration endpoints
@@ -47,7 +47,7 @@ submitted / informational
 | `GET /v1/dashboard` | Public alert counts |
 | `GET /v1/reports`, `GET /v1/reports/:id` | Reviewer queue and report details |
 | `POST /v1/reports/:id/review`, `/evidence`, `/check-evidence`, `/decision`, `/correction`, `/retraction` | Reviewer workflow |
-| `GET /v1/watchlist`, `POST /v1/watchlist`, `POST /v1/watchlist/:id/check`, `/archive` | Manual watchlist |
+| `GET /v1/watchlist`, `POST /v1/watchlist`, `POST /v1/watchlist/:id/check`, `/archive` | Manual watchlist with a saved scan cursor |
 | `GET /v1/notifications/outbox` | Unsent events for future bot integration |
 
 Reviewer routes require `Authorization: Bearer <REVIEWER_TOKEN>`. The reviewer identity comes from `REVIEWER_ID`, not from the request. The browser page keeps its entered token only in page memory.
@@ -56,4 +56,4 @@ To publish a verified report, `POST /v1/reports/:id/decision` requires `outcome`
 
 ## Limits before deployment
 
-The shared token, self-declared reporter label, single-process JSON store, and loopback listener are for a local demo. Production authentication, storage, rate limiting, source credibility rules, notification delivery, and any onchain write design remain team decisions. A successful transaction, matching target address, or manual `verified` status is not a guarantee that a contract is safe.
+The shared token, self-declared reporter label, single-process JSON store, and loopback listener are for a local demo. Production authentication, storage, rate limiting, source credibility rules, notification delivery, and any onchain write design remain team decisions. Watch scans are manual and do not reconcile chain reorganizations. A successful transaction, matching target address, or manual `verified` status is not a guarantee that a contract is safe.

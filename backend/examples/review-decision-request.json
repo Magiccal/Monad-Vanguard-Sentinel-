@@ -1,0 +1,7 @@
+{
+  "outcome": "verified",
+  "classification": "credible_threat",
+  "reason": "The reviewer examined the fictional evidence and approved this demo alert for publication.",
+  "advice": "Avoid interacting with this fictional contract during the demonstration.",
+  "publicEvidenceIds": ["22222222-2222-4222-8222-222222222222"]
+}

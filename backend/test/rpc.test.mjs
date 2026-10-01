@@ -65,15 +65,73 @@ test('watchlist check records recent emitted logs without assigning risk', async
       if (method === 'eth_chainId') return '0x279f';
       if (method === 'eth_blockNumber') return '0x100';
       if (method === 'eth_getLogs') return [{
-        address, transactionHash: txHash, blockNumber: '0xff', topics: [`0x${'b'.repeat(64)}`],
+        address, transactionHash: txHash, blockNumber: '0xff',
+        blockHash: `0x${'c'.repeat(64)}`, logIndex: '0x1', topics: [`0x${'b'.repeat(64)}`],
       }];
       throw new Error(`Unexpected RPC method: ${method}`);
     },
   };
   const result = await inspectWatchTarget({ chainId: 10143, address }, rpc);
   assert.equal(result.logCount, 1);
+  assert.equal(result.state, 'scanned');
   assert.equal(result.fromBlock, '0x9d');
   assert.equal(result.samples[0].txHash, txHash);
   assert.equal(methods[2][1][0].toBlock, '0x100');
   assert.equal('risk' in result, false);
+});
+
+test('watchlist resumes from its saved cursor, chunks long gaps, and deduplicates logs', async () => {
+  const filters = [];
+  let latest = '0x305';
+  const repeatedLog = {
+    address, transactionHash: txHash, blockNumber: '0x101',
+    blockHash: `0x${'c'.repeat(64)}`, logIndex: '0x1', topics: [],
+  };
+  const rpc = {
+    async call(method, params) {
+      if (method === 'eth_chainId') return '0x279f';
+      if (method === 'eth_blockNumber') return latest;
+      if (method === 'eth_getLogs') {
+        filters.push(params[0]);
+        return params[0].fromBlock === '0x101' ? [repeatedLog, repeatedLog] : [];
+      }
+      throw new Error(`Unexpected RPC method: ${method}`);
+    },
+  };
+  const first = await inspectWatchTarget({ chainId: 10143, address, lastScannedBlock: '0x100' }, rpc);
+  assert.equal(first.fromBlock, '0x101');
+  assert.equal(first.toBlock, '0x2f4');
+  assert.equal(first.hasMore, true);
+  assert.equal(first.logCount, 1);
+  assert.equal(first.duplicateCount, 1);
+  assert.equal(filters.length, 5);
+  assert.equal(filters.at(-1).toBlock, '0x2f4');
+
+  const second = await inspectWatchTarget({
+    chainId: 10143, address, lastScannedBlock: first.toBlock, recentLogKeys: first.logKeys,
+  }, rpc);
+  assert.equal(second.fromBlock, '0x2f5');
+  assert.equal(second.toBlock, latest);
+  assert.equal(second.hasMore, false);
+  assert.equal(second.logCount, 0);
+
+  const count = filters.length;
+  latest = '0x305';
+  const third = await inspectWatchTarget({ chainId: 10143, address, lastScannedBlock: second.toBlock }, rpc);
+  assert.equal(third.state, 'up_to_date');
+  assert.equal(filters.length, count);
+});
+
+test('watchlist rejects RPC logs outside the requested block range', async () => {
+  const rpc = {
+    async call(method) {
+      if (method === 'eth_chainId') return '0x279f';
+      if (method === 'eth_blockNumber') return '0x100';
+      return [{
+        address, transactionHash: txHash, blockNumber: '0x1',
+        blockHash: `0x${'c'.repeat(64)}`, logIndex: '0x1', topics: [],
+      }];
+    },
+  };
+  await assert.rejects(inspectWatchTarget({ chainId: 10143, address }, rpc), { code: 'rpc_error' });
 });

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Vanguard Sentinel · 本地演示</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">◆</span><span>VANGUARD <strong>SENTINEL</strong></span></div>
+      <span class="environment">本地原型 · 人工核验</span>
+    </header>
+
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">MONAD COMMUNITY SECURITY INTELLIGENCE</p>
+        <h1>从线索到可行动告警</h1>
+        <p>提交可疑合约线索，记录证据，由审核者判断是否发布。链上查询只提供客观观察，不会自动判定合约风险。</p>
+        <div class="flow" aria-label="演示流程"><span>01 提交</span><i></i><span>02 审核</span><i></i><span>03 告警</span></div>
+      </section>
+
+      <section class="overview" aria-label="公开事件概览">
+        <div><strong id="metric-active">—</strong><span>当前告警</span></div>
+        <div><strong id="metric-credible">—</strong><span>可信威胁</span></div>
+        <div><strong id="metric-confirmed">—</strong><span>已确认事件</span></div>
+        <div><strong id="metric-retracted">—</strong><span>已撤回告警</span></div>
+      </section>
+
+      <div class="workspace">
+        <section class="panel" aria-labelledby="report-heading">
+          <div class="panel-heading"><div><p class="eyebrow">COMMUNITY REPORT</p><h2 id="report-heading">提交线索</h2></div><button type="button" id="fill-demo" class="button subtle">填入演示数据</button></div>
+          <form id="report-form" class="form-grid">
+            <label>提交者标识<input name="reporterId" autocomplete="off" required minlength="2" maxlength="80" placeholder="例如 community-member"></label>
+            <label>链 ID<input name="chainId" type="number" min="1" step="1" required placeholder="按所选 Monad 网络填写"></label>
+            <label class="wide">合约地址<input name="contractAddress" required pattern="0x[0-9a-fA-F]{40}" placeholder="0x…"></label>
+            <label class="wide">线索标题<input name="title" required minlength="10" maxlength="160" placeholder="描述观察到的可疑情况，避免未核实的定性"></label>
+            <label class="wide">详细说明<textarea name="description" required minlength="20" maxlength="2000" rows="4" placeholder="说明来源、时间和可复核的事实"></textarea></label>
+            <label>证据类型<select name="evidenceKind"><option value="transaction">交易哈希</option><option value="public_source">公开来源</option></select></label>
+            <label>证据值<input name="evidenceValue" required placeholder="0x… 或 https://…"></label>
+            <label class="wide">证据说明<input name="evidenceNote" required minlength="10" maxlength="500" placeholder="解释这条证据与报告的关系"></label>
+            <div class="form-actions wide"><button class="button primary" type="submit">提交报告</button><p id="report-result" class="feedback" role="status" aria-live="polite"></p></div>
+          </form>
+        </section>
+
+        <section class="panel" aria-labelledby="alerts-heading">
+          <div class="panel-heading"><div><p class="eyebrow">PUBLIC ALERTS</p><h2 id="alerts-heading">公开告警</h2></div><button type="button" id="refresh-alerts" class="button subtle">刷新</button></div>
+          <p class="hint">这里仅列出人工核验且尚未撤回的告警。未经审核的报告不会公开。</p>
+          <div id="alerts" class="stack" aria-live="polite"></div>
+          <details class="history-panel"><summary>查看已发布事件历史</summary><div id="alert-history" class="stack"></div></details>
+          <form id="lookup-form" class="lookup"><label>按告警 ID 查看更正或撤回记录<input name="alertId" required placeholder="输入已发布告警 ID"></label><button class="button subtle" type="submit">查询</button></form>
+          <div id="lookup-result" class="stack" aria-live="polite"></div>
+        </section>
+      </div>
+
+      <section class="panel review-panel" aria-labelledby="review-heading">
+        <div class="panel-heading"><div><p class="eyebrow">REVIEWER WORKSPACE</p><h2 id="review-heading">审核工作台</h2></div><span class="tag">仅本地演示</span></div>
+        <p class="hint">令牌只保留在当前页面，不写入浏览器存储。当前身份由服务端的 REVIEWER_ID 指定。</p>
+        <div class="review-login"><label>审核令牌<input id="reviewer-token" type="password" autocomplete="off" placeholder="REVIEWER_TOKEN"></label><button type="button" id="load-reports" class="button primary">加载报告</button></div>
+        <p id="review-feedback" class="feedback" role="status" aria-live="polite"></p>
+        <div class="review-layout">
+          <div><h3>报告队列</h3><div id="reports" class="stack"></div><h3 class="subheading">贡献记录</h3><p class="hint">仅统计自报标识的报告数量，不是信誉评分。</p><div id="contributors" class="stack"></div></div>
+          <div><h3>当前报告</h3><div id="selected-report" class="selected"></div>
+            <div id="review-actions" class="review-actions hidden">
+              <div class="button-row"><button type="button" id="start-review" class="button subtle">开始审核</button><button type="button" id="check-evidence" class="button subtle">只读链上检查</button></div>
+              <details><summary>调查中补充证据</summary><label>类型<select id="added-evidence-kind"><option value="transaction">交易哈希</option><option value="public_source">公开来源</option></select></label><label>证据值<input id="added-evidence-value" placeholder="0x… 或 https://…"></label><label>证据说明<input id="added-evidence-note" minlength="10" maxlength="500"></label><button type="button" id="add-evidence" class="button subtle">添加证据</button></details>
+              <label>审核理由<textarea id="decision-reason" minlength="20" maxlength="1000" rows="3" placeholder="记录可复核的判断依据"></textarea></label>
+              <label>用户行动建议<textarea id="decision-advice" minlength="10" maxlength="500" rows="2" placeholder="核验通过时填写"></textarea></label>
+              <label>公开级别<select id="decision-classification"><option value="credible_threat">可信威胁</option><option value="confirmed_incident">已确认事件</option></select></label>
+              <p class="hint">发布前，请在当前报告中勾选已核对且可以公开的证据；未勾选的证据和对应链上观察不会公开。</p>
+              <div class="button-row"><button type="button" id="verify" class="button primary">核验并发布</button><button type="button" id="reject" class="button danger">驳回</button></div>
+              <details><summary>更正已发布告警</summary><label>新标题<input id="correction-title" minlength="10" maxlength="160"></label><label>新建议<textarea id="correction-advice" minlength="10" maxlength="500" rows="2"></textarea></label><label>公开级别<select id="correction-classification"><option value="credible_threat">可信威胁</option><option value="confirmed_incident">已确认事件</option></select></label><label>更正理由<textarea id="correction-reason" minlength="20" maxlength="1000" rows="2"></textarea></label><button type="button" id="correct" class="button subtle">保存更正</button></details>
+              <details><summary>撤回已发布告警</summary><label>撤回理由<textarea id="retraction-reason" minlength="20" maxlength="1000" rows="2"></textarea></label><button type="button" id="retract" class="button danger">撤回告警</button></details>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace support-panels" aria-label="辅助审核工具">
+        <div class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">ONCHAIN WATCHLIST</p><h2>地址监看</h2></div><button type="button" id="load-watchlist" class="button subtle">刷新</button></div>
+          <p class="hint">手动查询合约最近 100 个区块发出的事件日志。日志数量不是风险评分，也不代表没有日志就安全。</p>
+          <form id="watch-form" class="form-grid">
+            <label>链 ID<input name="chainId" type="number" min="1" step="1" required></label>
+            <label>标签<input name="label" required minlength="2" maxlength="120"></label>
+            <label class="wide">合约地址<input name="address" required pattern="0x[0-9a-fA-F]{40}"></label>
+            <div class="wide"><button class="button subtle" type="submit">加入监看列表</button></div>
+          </form>
+          <p id="watch-feedback" class="feedback" role="status" aria-live="polite"></p>
+          <div id="watchlist" class="stack"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">NOTIFICATION DRAFTS</p><h2>通知草稿</h2></div><button type="button" id="load-outbox" class="button subtle">刷新</button></div>
+          <p class="hint">发布、更正和撤回会生成待对接通知事件。当前不会发送至 Telegram、Discord 或任何用户。</p>
+          <div id="outbox" class="stack"></div>
+        </div>
+      </section>
+
+      <footer>演示系统 · 提交内容和核验结论均需人工复核 · 请勿将演示数据当作真实安全情报</footer>
+    </main>
+  </body>
+</html>

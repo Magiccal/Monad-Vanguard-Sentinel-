@@ -1,0 +1,13 @@
+{
+  "name": "monad-vanguard-sentinel-backend",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test",
+    "demo": "node scripts/demo.mjs"
+  }
+}

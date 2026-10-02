@@ -1,4 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import {
+  detectSensitiveMaterial, inspectPublicSourceUrl, normalizeAddress, normalizeTransactionHash,
+} from './validation.mjs';
+
+const PUBLIC_DISCLAIMER = 'Independent community project · Not affiliated with Monad Foundation · Not financial advice';
 
 export class DomainError extends Error {
   constructor(status, code, message) {
@@ -30,29 +35,38 @@ function reason(value) {
   return string(value, 'reason', 20, 1000);
 }
 
+function rejectSensitiveMaterial(value) {
+  if (detectSensitiveMaterial(value)) {
+    fail(400, 'sensitive_content', 'Remove seed phrases and private keys from this text');
+  }
+}
+
 function address(value) {
-  if (typeof value !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(value)) {
+  const normalized = normalizeAddress(value);
+  if (!normalized) {
     fail(400, 'invalid_input', 'contractAddress must be a 20-byte hex address');
   }
-  return value.toLowerCase();
+  return normalized;
 }
 
 function evidence(value, at, actor) {
   const item = object(value, 'evidence item');
   const note = string(item.note, 'evidence note', 10, 500);
+  rejectSensitiveMaterial(note);
   if (item.kind === 'transaction') {
-    if (typeof item.txHash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(item.txHash)) {
+    const txHash = normalizeTransactionHash(item.txHash);
+    if (!txHash) {
       fail(400, 'invalid_input', 'transaction evidence requires a 32-byte txHash');
     }
-    return { id: randomUUID(), kind: 'transaction', txHash: item.txHash.toLowerCase(), note, addedAt: at, addedBy: actor };
+    return { id: randomUUID(), kind: 'transaction', txHash, note, addedAt: at, addedBy: actor };
   }
   if (item.kind === 'public_source') {
-    let url;
-    try { url = new URL(item.url); } catch { fail(400, 'invalid_input', 'source URL is invalid'); }
-    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.href.length > 2048) {
+    const source = inspectPublicSourceUrl(item.url);
+    if (source.error === 'invalid') fail(400, 'invalid_input', 'source URL is invalid');
+    if (source.error) {
       fail(400, 'invalid_input', 'source URL must be HTTPS without credentials, query, or fragment');
     }
-    return { id: randomUUID(), kind: 'public_source', url: url.href, note, addedAt: at, addedBy: actor };
+    return { id: randomUUID(), kind: 'public_source', url: source.url, note, addedAt: at, addedBy: actor };
   }
   fail(400, 'invalid_input', 'evidence kind must be transaction or public_source');
 }
@@ -85,7 +99,13 @@ function publicAlert(report) {
   const latest = report.alertVersions.at(-1);
   const approvedEvidenceIds = new Set(report.publicEvidenceIds ?? []);
   const observation = report.observations?.at(-1);
-  const publicFindings = observation?.findings.filter((item) => approvedEvidenceIds.has(item.evidenceId)) ?? [];
+  const publicFindings = (observation?.findings ?? []).filter((item) => approvedEvidenceIds.has(item.evidenceId)).map((item) => ({
+    evidenceId: item.evidenceId, txHash: item.txHash, state: item.state,
+    directTargetMatch: item.directTargetMatch,
+    ...(item.txTo !== undefined ? { txTo: item.txTo } : {}),
+    ...(item.blockNumber !== undefined ? { blockNumber: item.blockNumber } : {}),
+    ...(item.receiptStatus !== undefined ? { receiptStatus: item.receiptStatus } : {}),
+  }));
   return {
     id: report.id,
     status: report.status,
@@ -94,15 +114,21 @@ function publicAlert(report) {
     contractAddress: report.contractAddress,
     title: latest.title,
     advice: latest.advice,
-    evidence: report.evidence.filter((item) => approvedEvidenceIds.has(item.id)).map(({ addedBy, ...item }) => item),
-    onchainObservation: publicFindings.length ? { ...observation, findings: publicFindings } : null,
+    disclaimer: PUBLIC_DISCLAIMER,
+    evidence: report.evidence.filter((item) => approvedEvidenceIds.has(item.id)).map((item) => ({
+      id: item.id, kind: item.kind, note: item.note, addedAt: item.addedAt,
+      ...(item.kind === 'transaction' ? { txHash: item.txHash } : { url: item.url }),
+    })),
+    onchainObservation: publicFindings.length ? {
+      observedAt: observation.observedAt, chainId: observation.chainId, findings: publicFindings,
+    } : null,
     publishedAt: report.alertVersions[0].at,
     updatedAt: report.updatedAt,
     version: report.alertVersions.length,
     corrections: report.alertVersions.slice(1).map(({ at, reason: correctionReason, title, advice, classification }, index) => ({
       version: index + 2, at, reason: correctionReason, title, advice, classification,
     })),
-    ...(report.retraction ? { retraction: report.retraction } : {}),
+    ...(report.retraction ? { retraction: { at: report.retraction.at, reason: report.retraction.reason } } : {}),
   };
 }
 
@@ -114,7 +140,7 @@ function enqueueNotification(state, report, kind, at) {
     alertId: alert.id, version: alert.version, status: alert.status,
     classification: alert.classification, chainId: alert.chainId,
     contractAddress: alert.contractAddress, title: alert.title,
-    advice: alert.advice, alertPath: `/v1/alerts/${alert.id}`,
+    advice: alert.advice, disclaimer: alert.disclaimer, alertPath: `/v1/alerts/${alert.id}`,
   });
 }
 
@@ -125,6 +151,8 @@ export function createSentinel(store, { now = () => new Date().toISOString() } =
       const reporterId = string(data.reporterId, 'reporterId', 2, 80);
       const title = string(data.title, 'title', 10, 160);
       const description = string(data.description, 'description', 20, 2000);
+      rejectSensitiveMaterial(title);
+      rejectSensitiveMaterial(description);
       if (!Number.isSafeInteger(data.chainId) || data.chainId <= 0) {
         fail(400, 'invalid_input', 'chainId must be a positive integer');
       }
@@ -215,6 +243,8 @@ export function createSentinel(store, { now = () => new Date().toISOString() } =
       }
       const decisionReason = reason(data.reason);
       const advice = data.outcome === 'verified' ? string(data.advice, 'advice', 10, 500) : null;
+      rejectSensitiveMaterial(decisionReason);
+      rejectSensitiveMaterial(advice);
       const classification = data.outcome === 'verified' ? data.classification : null;
       if (data.outcome === 'verified' && !['credible_threat', 'confirmed_incident'].includes(classification)) {
         fail(400, 'invalid_input', 'verified reports require credible_threat or confirmed_incident classification');
@@ -250,6 +280,9 @@ export function createSentinel(store, { now = () => new Date().toISOString() } =
       const title = string(data.title, 'title', 10, 160);
       const advice = string(data.advice, 'advice', 10, 500);
       const correctionReason = reason(data.reason);
+      rejectSensitiveMaterial(title);
+      rejectSensitiveMaterial(advice);
+      rejectSensitiveMaterial(correctionReason);
       if (data.classification !== undefined && !['credible_threat', 'confirmed_incident'].includes(data.classification)) {
         fail(400, 'invalid_input', 'classification must be credible_threat or confirmed_incident');
       }
@@ -269,6 +302,7 @@ export function createSentinel(store, { now = () => new Date().toISOString() } =
     retract(id, reviewerId, input) {
       const actor = string(reviewerId, 'reviewerId', 2, 80);
       const retractionReason = reason(object(input, 'retraction').reason);
+      rejectSensitiveMaterial(retractionReason);
       return store.update((state) => {
         const report = findReport(state, id);
         requireStatus(report, 'verified');

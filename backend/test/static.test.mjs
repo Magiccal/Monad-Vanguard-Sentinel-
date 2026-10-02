@@ -26,6 +26,7 @@ test('local demo page and assets are served with a restrictive content policy', 
   assert.match(page.headers['content-type'], /text\/html/);
   assert.match(page.headers['content-security-policy'], /script-src 'self'/);
   assert.match(page.body, /提交线索/);
+  assert.match(page.body, /Not affiliated with Monad Foundation/);
   assert.match(page.body, /\/app\.js/);
   assert.equal((await invoke('/app.js')).status, 200);
   assert.equal((await invoke('/styles.css')).status, 200);

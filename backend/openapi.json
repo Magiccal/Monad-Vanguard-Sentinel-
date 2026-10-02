@@ -351,7 +351,7 @@
         ]
       },
       "Alert": {
-        "type": "object", "required": ["id", "status", "classification", "chainId", "contractAddress", "title", "advice", "evidence", "publishedAt", "updatedAt", "version", "corrections", "onchainObservation"],
+        "type": "object", "required": ["id", "status", "classification", "chainId", "contractAddress", "title", "advice", "disclaimer", "evidence", "publishedAt", "updatedAt", "version", "corrections", "onchainObservation"],
         "properties": {
           "id": { "type": "string", "format": "uuid" },
           "status": { "enum": ["verified", "retracted"] },
@@ -360,6 +360,7 @@
           "contractAddress": { "type": "string" },
           "title": { "type": "string" },
           "advice": { "type": "string" },
+          "disclaimer": { "type": "string", "const": "Independent community project · Not affiliated with Monad Foundation · Not financial advice" },
           "evidence": { "type": "array", "items": { "$ref": "#/components/schemas/PublicEvidence" } },
           "onchainObservation": { "oneOf": [{ "$ref": "#/components/schemas/OnchainObservation" }, { "type": "null" }] },
           "publishedAt": { "type": "string", "format": "date-time" },
@@ -429,7 +430,7 @@
         ]
       },
       "NotificationEvent": {
-        "type": "object", "required": ["id", "kind", "createdAt", "deliveryState", "alertId", "version", "status", "classification", "chainId", "contractAddress", "title", "advice", "alertPath"],
+        "type": "object", "required": ["id", "kind", "createdAt", "deliveryState", "alertId", "version", "status", "classification", "chainId", "contractAddress", "title", "advice", "disclaimer", "alertPath"],
         "properties": {
           "id": { "type": "string", "format": "uuid" },
           "kind": { "enum": ["published", "corrected", "retracted"] },
@@ -443,6 +444,7 @@
           "contractAddress": { "type": "string" },
           "title": { "type": "string" },
           "advice": { "type": "string" },
+          "disclaimer": { "type": "string", "const": "Independent community project · Not affiliated with Monad Foundation · Not financial advice" },
           "alertPath": { "type": "string" }
         }
       },

@@ -8,6 +8,7 @@
       "contractAddress": "0x1111111111111111111111111111111111111111",
       "title": "Demo: suspicious contract activity",
       "advice": "Avoid interacting with this fictional contract during the demonstration.",
+      "disclaimer": "Independent community project · Not affiliated with Monad Foundation · Not financial advice",
       "evidence": [
         {
           "id": "22222222-2222-4222-8222-222222222222",

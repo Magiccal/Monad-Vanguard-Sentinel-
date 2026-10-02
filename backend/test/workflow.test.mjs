@@ -59,6 +59,7 @@ test('verification, correction, and retraction keep a public audit trail', async
   assert.equal(sentinel.listAlerts().length, 1);
   assert.equal(sentinel.getAlert(id).version, 1);
   assert.equal(sentinel.getAlert(id).classification, 'credible_threat');
+  assert.match(sentinel.getAlert(id).disclaimer, /Not affiliated with Monad Foundation/);
   assert.equal('reporterId' in sentinel.getAlert(id), false);
   assert.ok(sentinel.getAlert(id).evidence.every((item) => !('addedBy' in item)));
   assert.deepEqual(sentinel.getAlert(id).evidence.map((item) => item.id), [approvedId]);
@@ -86,9 +87,67 @@ test('verification, correction, and retraction keep a public audit trail', async
     'published', 'corrected', 'retracted',
   ]);
   assert.ok(sentinel.listNotificationEvents().every((item) => item.deliveryState === 'draft'));
+  assert.ok(sentinel.listNotificationEvents().every((item) => item.disclaimer === sentinel.getAlert(id).disclaimer));
   assert.deepEqual(sentinel.getReport(id).history.map((item) => item.type), [
     'submitted', 'review_started', 'evidence_added', 'verified', 'corrected', 'retracted',
   ]);
+});
+
+test('public alerts allowlist approved evidence and findings across their full lifecycle', async () => {
+  const store = await Store.open();
+  const sentinel = createSentinel(store);
+  const { id } = await sentinel.submit(reportInput());
+  await sentinel.startReview(id, 'reviewer');
+  const hiddenEvidence = await sentinel.addEvidence(id, 'reviewer', {
+    kind: 'public_source', url: 'https://example.org/private-review',
+    note: 'PRIVATE_SENTINEL_MARKER evidence awaiting public approval.',
+  });
+  const approvedId = sentinel.getReport(id).evidence[0].id;
+  await sentinel.recordOnchainObservation(id, 'reviewer', {
+    observedAt: '2026-10-02T00:00:00.000Z', chainId: 10143,
+    reviewerPrivateNote: 'PRIVATE_SENTINEL_MARKER',
+    findings: [
+      { evidenceId: approvedId, txHash: `0x${'a'.repeat(64)}`, state: 'mined',
+        directTargetMatch: true, blockNumber: '0x1', receiptStatus: 'success',
+        reviewerPrivateNote: 'PRIVATE_SENTINEL_MARKER' },
+      { evidenceId: hiddenEvidence.id, txHash: `0x${'b'.repeat(64)}`, state: 'pending',
+        reviewerPrivateNote: 'PRIVATE_SENTINEL_MARKER' },
+    ],
+  });
+  await store.update((state) => {
+    const report = state.reports.find((item) => item.id === id);
+    report.evidence[0].reviewerPrivateNote = 'PRIVATE_SENTINEL_MARKER';
+    report.reviewerPrivateNote = 'PRIVATE_SENTINEL_MARKER';
+  });
+  await sentinel.decide(id, 'reviewer', {
+    outcome: 'verified', classification: 'credible_threat',
+    reason: 'The fictional transaction was manually accepted for this test.',
+    advice: 'Avoid this fictional contract until the review is complete.',
+    publicEvidenceIds: [approvedId],
+  });
+
+  const assertPublic = (alert) => {
+    assert.equal(JSON.stringify(alert).includes('PRIVATE_SENTINEL_MARKER'), false);
+    assert.deepEqual(alert.evidence.map((item) => item.id), [approvedId]);
+    assert.deepEqual(alert.onchainObservation.findings.map((item) => item.evidenceId), [approvedId]);
+    assert.equal(alert.onchainObservation.findings[0].receiptStatus, 'success');
+  };
+  assertPublic(sentinel.getAlert(id));
+  assertPublic(sentinel.listAlerts()[0]);
+  await sentinel.correct(id, 'reviewer', {
+    title: 'Updated fictional contract warning',
+    advice: 'Continue avoiding the fictional contract until the review is complete.',
+    reason: 'The original fictional warning needed a clearer explanation.',
+  });
+  assertPublic(sentinel.listAlertHistory()[0]);
+  await sentinel.retract(id, 'reviewer', {
+    reason: 'The fictional warning has been withdrawn after further review.',
+  });
+  await store.update((state) => {
+    state.reports.find((item) => item.id === id).retraction.reviewerPrivateNote = 'PRIVATE_SENTINEL_MARKER';
+  });
+  assertPublic(sentinel.getAlert(id));
+  assertPublic(sentinel.listAlertHistory()[0]);
 });
 
 test('watchlist prevents duplicate active targets and preserves archived observations', async () => {

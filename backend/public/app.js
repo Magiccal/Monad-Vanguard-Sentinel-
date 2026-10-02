@@ -41,17 +41,25 @@ async function request(path, { method = 'GET', body, reviewer = false } = {}) {
   return result;
 }
 
-function evidenceList(items) {
+function defangUrl(value) {
+  return String(value).replace(/^https:/i, 'hxxps:').replace(/\./g, '[.]');
+}
+
+function evidenceList(items, { publicView = false } = {}) {
   const list = node('ul');
   for (const item of items) {
     const row = node('li');
     row.append(node('span', `${item.kind === 'transaction' ? '交易' : '来源'}：`));
     if (item.kind === 'public_source') {
-      const link = node('a', item.url);
-      link.href = item.url;
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      row.append(link);
+      if (publicView) {
+        row.append(node('code', defangUrl(item.url)));
+      } else {
+        const link = node('a', item.url);
+        link.href = item.url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        row.append(link);
+      }
     } else {
       row.append(node('code', item.txHash));
     }
@@ -68,9 +76,10 @@ function alertCard(alert) {
   card.append(head, node('p', `链 ${alert.chainId} · 合约 ${alert.contractAddress}`));
   card.append(node('p', `公开级别：${classificationLabel[alert.classification] || alert.classification}`));
   card.append(node('p', `建议：${alert.advice}`));
+  card.append(node('p', alert.disclaimer));
   card.append(node('p', `发布：${time(alert.publishedAt)} · 版本 ${alert.version}`));
   card.append(node('p', `告警 ID：${alert.id}`));
-  card.append(evidenceList(alert.evidence));
+  card.append(evidenceList(alert.evidence, { publicView: true }));
   if (alert.onchainObservation) {
     const observation = alert.onchainObservation;
     card.append(node('p', `最近链上观察：${time(observation.observedAt)}；${observation.findings.length} 笔交易证据。链上观察不代表恶意判断。`));
@@ -243,7 +252,7 @@ async function refreshOutbox() {
   const cards = events.slice().reverse().map((event) => {
     const card = node('article', undefined, 'card');
     card.append(node('h3', `${event.kind} · ${classificationLabel[event.classification] || event.classification}`));
-    card.append(node('p', event.title), node('p', event.advice));
+    card.append(node('p', event.title), node('p', event.advice), node('p', event.disclaimer));
     card.append(node('p', `告警 ${event.alertId} · v${event.version} · ${time(event.createdAt)} · 未发送`));
     return card;
   });

@@ -18,10 +18,12 @@ The team has three reviewers; Ollie is the Lead. No reviewer may approve their o
 | Triage, merge duplicates, publish `informational`, or open `under_investigation` | One reviewer |
 | Publish `credible_threat` at any severity, or `confirmed_incident` at medium/low severity | Two of three reviewers |
 | Publish `confirmed_incident` or `resolved` at critical/high severity | Two of three reviewers, including the Lead |
+| Publish `resolved` at medium/low severity | Any one reviewer (confirmed 3 October 17:48) |
+| Publish `false_alarm` (closing a published incident) | Two of three reviewers; the Lead is not required (confirmed 3 October 17:48) |
 
-If the Lead has not responded within one hour, any two reviewers may publish a critical/high `confirmed_incident` or `resolved` item; the Lead reviews it afterwards. A single-reviewer demo is acceptable if the API shape can represent the approval model. This does not make a shared token or a client-provided reviewer name suitable for production voting.
+If the Lead has not responded within one hour after the trusted bot confirms it has notified the Lead, any two reviewers may publish a critical/high `confirmed_incident` or `resolved` item; the Lead reviews it afterwards. The bot's confirmation timestamp is recorded on the proposal and the published incident, and a failed notification does not start the clock. A single-reviewer demo is acceptable if the API shape can represent the approval model. This does not make a shared token or a client-provided reviewer name suitable for production voting.
 
-The exact trigger for the one-hour fallback, handling of medium/low `resolved`, and production reviewer identity/authentication remain integration details to confirm. Until then, do not silently grant a broader approval path.
+Production reviewer identity/authentication and real Discord delivery remain integration details to build; the backend records only what the trusted bot asserts. Until then, do not silently grant a broader approval path.
 
 Selected public evidence still needs human source verification. A URL entered under `official_statement` is a reporter's claim; URL syntax checks alone cannot establish that it belongs to a project or that the statement is genuine.
 

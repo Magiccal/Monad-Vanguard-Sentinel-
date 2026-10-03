@@ -25,6 +25,15 @@
         "responses": { "200": { "description": "Minimal status list", "content": { "application/json": { "schema": { "type": "object", "required": ["reports"], "properties": { "reports": { "type": "array", "items": { "$ref": "#/components/schemas/DiscordReportStatus" } } } } } } }, "401": { "$ref": "#/components/responses/Error" } }
       }
     },
+    "/v1/discord/lead-notifications": {
+      "post": {
+        "summary": "Confirm through the trusted bot whether the Lead was actually notified",
+        "description": "Ollie 2026-10-03: the one-hour Lead fallback clock starts only when the bot confirms it has notified the Lead. delivered=true records the first confirmation timestamp (leadNotifiedAt) on the pending proposal and later the published incident. delivered=false records an audit entry but never starts the clock. Only pending proposals whose policy requires the Lead accept this call.",
+        "security": [{ "DiscordAdapterBearer": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LeadNotificationInput" } } } },
+        "responses": { "200": { "description": "Notification confirmation receipt", "content": { "application/json": { "schema": { "type": "object", "required": ["proposalId", "delivered", "leadNotifiedAt"], "properties": { "proposalId": { "type": "string", "format": "uuid" }, "delivered": { "type": "boolean" }, "leadNotifiedAt": { "type": ["string", "null"], "format": "date-time" } } } } } }, "401": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } }
+      }
+    },
     "/v1/mvp/reports": {
       "get": { "summary": "List private MVP reports", "security": [{ "ReviewerBearer": [] }], "responses": { "200": { "description": "Private reports", "content": { "application/json": { "schema": { "type": "object", "required": ["reports"], "properties": { "reports": { "type": "array", "items": { "$ref": "#/components/schemas/PrivateReport" } } } } } } } } }
     },
@@ -47,19 +56,22 @@
       "get": { "summary": "Get one published incident", "parameters": [{ "$ref": "#/components/parameters/IncidentId" }], "responses": { "200": { "description": "Public incident", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicIncident" } } } }, "404": { "$ref": "#/components/responses/Error" } } }
     },
     "/v1/mvp/incidents/{id}/publication": {
-      "post": { "summary": "Propose a new public version of an incident", "description": "High/critical resolution requires 2 of 3 including Lead. Medium/low resolution and false-alarm transition are conservatively blocked pending product confirmation. No downgrade from high/critical confirmed incident can bypass Lead.", "security": [{ "ReviewerBearer": [] }], "parameters": [{ "$ref": "#/components/parameters/IncidentId" }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicationInput" } } } }, "responses": { "200": { "description": "Pending or published proposal", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalResult" } } } }, "409": { "$ref": "#/components/responses/Error" } } }
+      "post": { "summary": "Propose a new public version of an incident", "description": "Medium/low resolution needs any one reviewer. Critical/high resolution keeps 2 of 3 including the Lead. Public false_alarm needs 2 of 3 reviewers and does not require the Lead; it may close any published incident that is not already resolved or false_alarm and must retain the published severity. No downgrade from high/critical confirmed incident can bypass Lead.", "security": [{ "ReviewerBearer": [] }], "parameters": [{ "$ref": "#/components/parameters/IncidentId" }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicationInput" } } } }, "responses": { "200": { "description": "Pending or published proposal", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalResult" } } } }, "409": { "$ref": "#/components/responses/Error" } } }
     },
     "/v1/mvp/proposals/{id}": {
       "get": { "summary": "Read private proposal and approval audit", "security": [{ "ReviewerBearer": [] }], "parameters": [{ "$ref": "#/components/parameters/ProposalId" }], "responses": { "200": { "description": "Private proposal", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PrivateProposal" } } } } } }
     },
     "/v1/mvp/proposals/{id}/approval": {
-      "post": { "summary": "Record one authenticated reviewer's approval", "description": "Reviewer identity comes from the server-configured bearer token, never the request body. Duplicate votes and approval of one's own report are rejected. For high/critical confirmed or resolved incidents, two non-Lead votes do not publish even after one hour: the exception needs a verified Lead notification and is not enabled in this draft backend.", "security": [{ "ReviewerBearer": [] }], "parameters": [{ "$ref": "#/components/parameters/ProposalId" }], "responses": { "200": { "description": "Pending or published proposal", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalResult" } } } }, "403": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } } }
+      "post": { "summary": "Record one authenticated reviewer's approval", "description": "Reviewer identity comes from the server-configured bearer token, never the request body. Duplicate votes and approval of one's own report are rejected. For Lead-required proposals, two non-Lead votes publish after the one-hour fallback clock, which starts only when the bot confirms it has notified the Lead via /v1/discord/lead-notifications.", "security": [{ "ReviewerBearer": [] }], "parameters": [{ "$ref": "#/components/parameters/ProposalId" }], "responses": { "200": { "description": "Pending or published proposal", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalResult" } } } }, "403": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/mvp/proposals/{id}/evaluate": {
+      "post": { "summary": "Re-evaluate a pending proposal against the one-hour Lead fallback clock", "description": "Reviewer-authenticated re-check of the approval state at the current time. Publishes only when the confirmed approval policy is satisfied, including the bot-confirmed one-hour Lead fallback. Otherwise returns the pending proposal unchanged.", "security": [{ "ReviewerBearer": [] }], "parameters": [{ "$ref": "#/components/parameters/ProposalId" }], "responses": { "200": { "description": "Pending or published proposal", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalResult" } } } }, "401": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" } } }
     },
     "/v1/mvp/proposals/{id}/cancel": {
       "post": { "summary": "Lead cancels a pending proposal with an audit reason", "description": "Use after a reviewer roster change before creating a new proposal. In single-reviewer demo mode the sole reviewer may cancel.", "security": [{ "ReviewerBearer": [] }], "parameters": [{ "$ref": "#/components/parameters/ProposalId" }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["reason"], "properties": { "reason": { "type": "string", "minLength": 20, "maxLength": 1000 } } } } } }, "responses": { "200": { "description": "Cancelled proposal", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProposalResult" } } } }, "403": { "$ref": "#/components/responses/Error" } } }
     },
     "/v1/mvp/notifications/outbox": {
-      "get": { "summary": "Read unsent Discord notification drafts", "description": "No delivery, retry, or Discord integration is implemented. Only credible threat, confirmed incident, and high/critical resolution create draft entries. Informational and Under Investigation do not automatically notify Discord while notification policy remains open.", "security": [{ "ReviewerBearer": [] }], "responses": { "200": { "description": "Draft events", "content": { "application/json": { "schema": { "type": "object", "required": ["events"], "properties": { "events": { "type": "array", "items": { "$ref": "#/components/schemas/NotificationDraft" } } } } } } } } }
+      "get": { "summary": "Read unsent Discord notification drafts", "description": "No delivery, retry, or Discord integration is implemented. Credible threat, confirmed incident, resolution, and false_alarm publication create draft entries. Informational and Under Investigation do not automatically notify Discord while notification policy remains open.", "security": [{ "ReviewerBearer": [] }], "responses": { "200": { "description": "Draft events", "content": { "application/json": { "schema": { "type": "object", "required": ["events"], "properties": { "events": { "type": "array", "items": { "$ref": "#/components/schemas/NotificationDraft" } } } } } } } } }
     }
   },
   "components": {
@@ -77,7 +89,7 @@
       "Error": { "type": "object", "required": ["error", "message"], "properties": { "error": { "type": "string" }, "message": { "type": "string" } } },
       "ReportPublicId": { "type": "string", "pattern": "^R-[0-9]{4,}$", "example": "R-0001" },
       "IncidentPublicId": { "type": "string", "pattern": "^SEN-[0-9]{4,}$", "example": "SEN-0001" },
-      "Level": { "type": "string", "enum": ["informational", "under_investigation", "credible_threat", "confirmed_incident", "resolved", "false_alarm"], "description": "false_alarm is reserved in the model; publication is blocked pending approval-policy confirmation" },
+      "Level": { "type": "string", "enum": ["informational", "under_investigation", "credible_threat", "confirmed_incident", "resolved", "false_alarm"], "description": "All six public levels are publishable. Ollie 2026-10-03: false_alarm needs 2 of 3 reviewers without the Lead; medium/low resolved needs any one reviewer." },
       "Severity": { "type": ["string", "null"], "enum": ["critical", "high", "medium", "low", null], "description": "Must be null for informational and a listed string for other publishable levels" },
       "Target": { "type": "object", "required": ["kind", "value"], "properties": { "kind": { "enum": ["address", "transaction_hash", "url", "x_handle"] }, "value": { "type": "string", "description": "Suspicious URLs may include query strings; stored privately, never fetched or automatically published" } } },
       "EvidenceInput": { "type": "object", "required": ["kind"], "properties": { "kind": { "enum": ["transaction", "link", "screenshot", "official_statement"] }, "reference": { "type": "string", "description": "Transaction hash or HTTP(S) URL where provided; upload transport is outside this draft" }, "note": { "type": "string", "maxLength": 500 } } },
@@ -90,6 +102,10 @@
         "evidence": { "type": "array", "maxItems": 10, "items": { "$ref": "#/components/schemas/EvidenceInput" } }
       } },
       "ReportReceipt": { "type": "object", "required": ["id", "status", "createdAt"], "properties": { "id": { "$ref": "#/components/schemas/ReportPublicId" }, "status": { "const": "submitted" }, "createdAt": { "type": "string", "format": "date-time" } } },
+      "LeadNotificationInput": { "type": "object", "required": ["proposalId", "delivered"], "properties": {
+        "proposalId": { "type": "string", "format": "uuid", "description": "The pending Lead-required publication proposal the bot tried to notify the Lead about" },
+        "delivered": { "type": "boolean", "description": "true only when the bot actually notified the Lead; false never starts the fallback clock" }
+      } },
       "DiscordReportStatus": { "type": "object", "required": ["id", "status", "incidentId", "mergedInto", "createdAt", "updatedAt"], "properties": {
         "id": { "$ref": "#/components/schemas/ReportPublicId" }, "status": { "enum": ["submitted", "triaged", "published", "merged"] },
         "incidentId": { "type": ["string", "null"] }, "mergedInto": { "type": ["string", "null"] },
@@ -110,13 +126,14 @@
         "publicEvidenceIds": { "type": "array", "maxItems": 10, "uniqueItems": true, "items": { "type": "string", "format": "uuid" }, "description": "Explicit IDs from the source report. Required nonempty for credible_threat and confirmed_incident; only transaction hashes and reviewer-selected HTTPS statement URLs without credentials/query/fragment may be published. Syntax validation does not authenticate a statement's author. On an incident update, omission retains the previous public evidence; [] clears it if the target level permits." }
       }, "allOf": [
         { "if": { "properties": { "level": { "const": "informational" } }, "required": ["level"] }, "then": { "properties": { "severity": { "type": "null" } } } },
-        { "if": { "properties": { "level": { "enum": ["under_investigation", "credible_threat", "confirmed_incident", "resolved"] } }, "required": ["level"] }, "then": { "required": ["severity"], "properties": { "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] } } } }
+        { "if": { "properties": { "level": { "enum": ["under_investigation", "credible_threat", "confirmed_incident", "resolved", "false_alarm"] } }, "required": ["level"] }, "then": { "required": ["severity"], "properties": { "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] } } } }
       ] },
       "Approval": { "type": "object", "required": ["reviewerId", "at"], "properties": { "reviewerId": { "type": "string" }, "at": { "type": "string", "format": "date-time" } } },
       "ProposalResult": { "type": "object", "required": ["id", "reportId", "incidentId", "status", "level", "severity", "approvals", "requiredApprovals", "leadRequired", "approvalMode"], "properties": {
         "id": { "type": "string", "format": "uuid" }, "reportId": { "$ref": "#/components/schemas/ReportPublicId" }, "incidentId": { "type": ["string", "null"] },
         "status": { "enum": ["pending", "published", "cancelled"] }, "level": { "$ref": "#/components/schemas/Level" }, "severity": { "$ref": "#/components/schemas/Severity" },
         "approvals": { "type": "array", "items": { "$ref": "#/components/schemas/Approval" } }, "requiredApprovals": { "type": "integer" }, "leadRequired": { "type": "boolean" },
+        "leadNotifiedAt": { "type": ["string", "null"], "format": "date-time", "description": "First bot-confirmed Lead notification time; the one-hour fallback clock starts here" },
         "approvalMode": { "enum": ["demo_single_reviewer", "three_reviewer_quorum"] }, "publishedIncident": { "$ref": "#/components/schemas/PublicIncident" }
       } },
       "PrivateProposal": { "type": "object", "required": ["id", "reportId", "status", "level", "severity", "title", "summary", "verificationNote", "advice", "reason", "approvals", "policy", "createdAt"], "properties": {
@@ -125,6 +142,7 @@
         "publicEvidence": { "type": "array", "items": { "$ref": "#/components/schemas/PublicEvidence" } },
         "approvals": { "type": "array", "items": { "$ref": "#/components/schemas/Approval" } }, "policy": { "type": "object", "required": ["count", "lead"], "properties": { "count": { "type": "integer" }, "lead": { "type": "boolean" } } },
         "rosterFingerprint": { "type": "string", "description": "Server-computed SHA-256 of reviewer IDs, Discord IDs and Lead role; pending proposals refuse votes after this changes" },
+        "leadNotifiedAt": { "type": ["string", "null"], "format": "date-time", "description": "First bot-confirmed Lead notification time for this pending proposal" },
         "createdAt": { "type": "string", "format": "date-time" }, "publishedAt": { "type": "string", "format": "date-time" }, "cancelledAt": { "type": "string", "format": "date-time" }, "cancelledBy": { "type": "string" }, "cancellationReason": { "type": "string" }
       } },
       "PublicEvidence": { "type": "object", "required": ["id", "kind", "reference"], "properties": { "id": { "type": "string", "format": "uuid" }, "kind": { "enum": ["transaction", "official_statement"] }, "reference": { "type": "string" } } },
@@ -134,7 +152,8 @@
         "timeline": { "type": "array", "items": { "type": "object", "required": ["at", "level", "severity", "summary"], "properties": { "at": { "type": "string", "format": "date-time" }, "level": { "$ref": "#/components/schemas/Level" }, "severity": { "$ref": "#/components/schemas/Severity" }, "summary": { "type": "string" } } }, "description": "Public version milestones only; reviewer IDs and private reasons are omitted" },
         "disclaimer": { "type": "string", "const": "Independent community project · Not affiliated with Monad Foundation · Not financial advice" },
         "publishedAt": { "type": "string", "format": "date-time" }, "updatedAt": { "type": "string", "format": "date-time" }, "version": { "type": "integer", "minimum": 1 },
-        "pendingLeadReview": { "type": "boolean" }, "approvalMode": { "enum": ["demo_single_reviewer", "three_reviewer_quorum"] }
+        "pendingLeadReview": { "type": "boolean" }, "approvalMode": { "enum": ["demo_single_reviewer", "three_reviewer_quorum"] },
+        "leadNotifiedAt": { "type": "string", "format": "date-time", "description": "Present when the bot confirmed it notified the Lead before publication" }
       } },
       "NotificationDraft": { "type": "object", "required": ["id", "channel", "deliveryState", "kind", "createdAt", "incident"], "properties": {
         "id": { "type": "string", "format": "uuid" }, "channel": { "const": "discord" }, "deliveryState": { "const": "draft" }, "kind": { "const": "incident_published" },

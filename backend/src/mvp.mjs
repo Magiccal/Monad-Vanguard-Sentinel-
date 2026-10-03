@@ -90,6 +90,7 @@ function publicIncident(incident) {
     version: incident.versions.length,
     pendingLeadReview: incident.pendingLeadReview === true,
     approvalMode: incident.approvalMode,
+    ...(incident.leadNotifiedAt ? { leadNotifiedAt: incident.leadNotifiedAt } : {}),
   };
 }
 function policy(level, severity, previous = null) {
@@ -100,19 +101,26 @@ function policy(level, severity, previous = null) {
   }
   if (level === 'credible_threat') return { count: 2, lead: priorLeadRequired };
   if (level === 'confirmed_incident') return { count: 2, lead: priorLeadRequired || ['critical', 'high'].includes(severity) };
-  if (level === 'resolved') return { count: 2, lead: true };
-  // The exact false-alarm transition is not yet confirmed; no publication is allowed.
-  fail(409, 'policy_unconfirmed', 'False-alarm publication policy is not confirmed');
+  // Ollie 2026-10-03 17:48: medium/low resolved needs any one reviewer; critical/high keeps 2-of-3 with the Lead.
+  if (level === 'resolved') return ['critical', 'high'].includes(severity) ? { count: 2, lead: true } : { count: 1, lead: false };
+  // Ollie 2026-10-03 17:48: public false_alarm needs 2 of 3 reviewers; the Lead is not required.
+  if (level === 'false_alarm') return { count: 2, lead: false };
+  fail(409, 'invalid_input', 'Unknown incident level');
 }
-function approvalState(proposal, reviewerById, demo, rosterFingerprint) {
+function approvalState(proposal, reviewerById, demo, rosterFingerprint, atMs) {
   if (proposal.rosterFingerprint !== rosterFingerprint) fail(409, 'reviewer_roster_changed', 'Reviewer roster changed; recreate the proposal under the current roster');
   if (demo) return { ready: true, pendingLeadReview: false };
   const approvals = [...new Set(proposal.approvals.map((item) => item.reviewerId).filter((id) => reviewerById.has(id)))];
   if (approvals.length < proposal.policy.count) return { ready: false, pendingLeadReview: false };
   if (!proposal.policy.lead) return { ready: true, pendingLeadReview: false };
   if (approvals.some((id) => reviewerById.get(id)?.isLead)) return { ready: true, pendingLeadReview: false };
-  // A draft request is not proof that a Lead was actually notified. Until a trusted
-  // delivery acknowledgement is integrated, the one-hour exception stays disabled.
+  // Ollie 2026-10-03 17:48: the one-hour fallback clock starts only when the trusted bot
+  // confirms it has notified the Lead. That confirmation timestamp is stored on the proposal
+  // and later on the published incident. A failed notification never starts the clock.
+  const notifiedAtMs = proposal.leadNotifiedAt ? Date.parse(proposal.leadNotifiedAt) : NaN;
+  if (Number.isFinite(notifiedAtMs) && atMs - notifiedAtMs >= 60 * 60 * 1000) {
+    return { ready: true, pendingLeadReview: true };
+  }
   return { ready: false, pendingLeadReview: false };
 }
 
@@ -140,7 +148,7 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
   function noSelfReview(report, reviewer) {
     if (reviewer.discordId && reviewer.discordId === report.reporterDiscordId) fail(403, 'self_review', 'Reviewer cannot approve their own report');
   }
-  function publish(mvp, proposal, at) {
+  function publish(mvp, proposal, at, { pendingLeadReview = false } = {}) {
     const report = find(mvp.reports, proposal.reportId, 'Report');
     let incident;
     if (proposal.incidentId) incident = find(mvp.incidents, proposal.incidentId, 'Incident');
@@ -161,7 +169,8 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
     incident.publicEvidence = proposal.publicEvidence;
     incident.updatedAt = at;
     incident.approvalMode = demo ? 'demo_single_reviewer' : 'three_reviewer_quorum';
-    incident.pendingLeadReview = false;
+    incident.pendingLeadReview = pendingLeadReview;
+    if (proposal.leadNotifiedAt) incident.leadNotifiedAt = proposal.leadNotifiedAt;
     incident.versions.push({ at, level: proposal.level, severity: proposal.severity, summary: proposal.summary,
       proposalId: proposal.id, approvals: proposal.approvals.map(({ reviewerId, at: approvedAt }) => ({ reviewerId, at: approvedAt })) });
     proposal.status = 'published';
@@ -170,7 +179,7 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
     report.updatedAt = at;
     report.history.push({ type: 'published', at, proposalId: proposal.id, incidentId: incident.id });
     // Outbox entries are drafts. No Discord message is sent by this backend.
-    if (['credible_threat', 'confirmed_incident', 'resolved'].includes(incident.level)) {
+    if (['credible_threat', 'confirmed_incident', 'resolved', 'false_alarm'].includes(incident.level)) {
       mvp.notificationEvents.push({ id: randomUUID(), channel: 'discord', deliveryState: 'draft', kind: 'incident_published', createdAt: at, incident: publicIncident(incident) });
     }
     return incident;
@@ -180,6 +189,7 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
       level: proposal.level, severity: proposal.severity, approvals: proposal.approvals,
       requiredApprovals: demo ? 1 : proposal.policy.count,
       leadRequired: !demo && proposal.policy.lead,
+      leadNotifiedAt: proposal.leadNotifiedAt ?? null,
       approvalMode: demo ? 'demo_single_reviewer' : 'three_reviewer_quorum',
       ...(incident ? { publishedIncident: publicIncident(incident) } : {}) };
   }
@@ -191,19 +201,16 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
     }
     const data = object(input, 'publication');
     if (!LEVELS.has(data.level)) fail(400, 'invalid_input', 'Unknown incident level');
-    if (data.level === 'false_alarm') fail(409, 'policy_unconfirmed', 'False-alarm publication policy is not confirmed');
     if (!incident && data.level === 'resolved') fail(409, 'invalid_transition', 'An unpublished report cannot be resolved');
-    if (incident && incident.level === 'resolved') fail(409, 'invalid_transition', 'A resolved incident cannot be changed through this draft API');
+    if (!incident && data.level === 'false_alarm') fail(409, 'invalid_transition', 'Only a published incident can be marked a false alarm');
+    if (incident && ['resolved', 'false_alarm'].includes(incident.level)) fail(409, 'invalid_transition', 'A closed incident cannot be changed through this draft API');
     if (data.level === 'resolved' && !['credible_threat', 'confirmed_incident'].includes(incident?.level)) {
       fail(409, 'invalid_transition', 'Only a published threat or confirmed incident can be resolved');
-    }
-    if (data.level === 'resolved' && !['critical', 'high'].includes(incident?.severity)) {
-      fail(409, 'policy_unconfirmed', 'Medium/low resolution policy is not confirmed');
     }
     const severity = data.level === 'informational' ? null : data.severity;
     if (data.level === 'informational' && data.severity !== null && data.severity !== undefined) fail(400, 'invalid_input', 'Informational severity must be null');
     if (severity !== null && !SEVERITIES.has(severity)) fail(400, 'invalid_input', 'Severity must be critical, high, medium, or low');
-    if (data.level === 'resolved' && severity !== incident.severity) fail(400, 'invalid_input', 'Resolution must retain the published severity');
+    if (['resolved', 'false_alarm'].includes(data.level) && severity !== incident.severity) fail(400, 'invalid_input', 'Closure must retain the published severity');
     const publicEvidenceIds = list(data.publicEvidenceIds ?? incident?.publicEvidence?.map((item) => item.id), 'publicEvidenceIds', 10);
     if (publicEvidenceIds.some((id) => typeof id !== 'string') || new Set(publicEvidenceIds).size !== publicEvidenceIds.length) {
       fail(400, 'invalid_input', 'publicEvidenceIds must be distinct evidence IDs');
@@ -239,7 +246,8 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
     };
     mvp.proposals.push(proposal);
     report.history.push({ type: 'publication_proposed', actor: reviewer.id, at, proposalId: proposal.id });
-    if (approvalState(proposal, reviewerById, demo, rosterFingerprint).ready) return proposalResult(proposal, publish(mvp, proposal, at));
+    const result = approvalState(proposal, reviewerById, demo, rosterFingerprint, Date.parse(at));
+    if (result.ready) return proposalResult(proposal, publish(mvp, proposal, at, result));
     return proposalResult(proposal);
   }
 
@@ -339,7 +347,8 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
         const at = now();
         proposal.approvals.push({ reviewerId: reviewer.id, at });
         report.history.push({ type: 'publication_approved', actor: reviewer.id, at, proposalId: proposal.id });
-        if (approvalState(proposal, reviewerById, demo, rosterFingerprint).ready) return proposalResult(proposal, publish(mvp, proposal, at));
+        const result = approvalState(proposal, reviewerById, demo, rosterFingerprint, Date.parse(at));
+        if (result.ready) return proposalResult(proposal, publish(mvp, proposal, at, result));
         return proposalResult(proposal);
       });
     },
@@ -359,6 +368,39 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
       });
     },
     getProposal(id, reviewerId) { actor(reviewerId); return store.read((state) => find(readMvp(state).proposals, id, 'Proposal')); },
+    // The trusted Discord bot confirms whether it actually notified the Lead. Ollie
+    // 2026-10-03 17:48: only a confirmed notification starts the one-hour fallback clock;
+    // a failed notification must not start it, so the timestamp stays unset.
+    recordLeadNotification(input) {
+      const data = object(input, 'lead notification');
+      if (typeof data.delivered !== 'boolean') fail(400, 'invalid_input', 'delivered must be a boolean');
+      const proposalId = text(data.proposalId, 'proposalId', 6, 64);
+      return store.update((state) => {
+        const mvp = mvpState(state);
+        const proposal = find(mvp.proposals, proposalId, 'Proposal');
+        if (proposal.status !== 'pending') fail(409, 'invalid_transition', 'Proposal is not pending');
+        if (!proposal.policy?.lead) fail(409, 'lead_not_required', 'This proposal does not require the Lead');
+        const at = now();
+        if (data.delivered && !proposal.leadNotifiedAt) proposal.leadNotifiedAt = at;
+        const report = find(mvp.reports, proposal.reportId, 'Report');
+        report.history.push({ type: 'lead_notification_recorded', at, proposalId: proposal.id, delivered: data.delivered });
+        return { proposalId: proposal.id, delivered: data.delivered, leadNotifiedAt: proposal.leadNotifiedAt ?? null };
+      });
+    },
+    // Re-evaluates a pending proposal against the current clock so the confirmed
+    // one-hour Lead fallback can publish without requiring another vote.
+    evaluateProposal(id, reviewerId) {
+      actor(reviewerId);
+      return store.update((state) => {
+        const mvp = mvpState(state);
+        const proposal = find(mvp.proposals, id, 'Proposal');
+        if (proposal.status !== 'pending') fail(409, 'invalid_transition', 'Proposal is not pending');
+        const at = now();
+        const result = approvalState(proposal, reviewerById, demo, rosterFingerprint, Date.parse(at));
+        if (result.ready) return proposalResult(proposal, publish(mvp, proposal, at, result));
+        return proposalResult(proposal);
+      });
+    },
     listIncidents() { return store.read((state) => readMvp(state).incidents.map(publicIncident)); },
     getIncident(id) { return store.read((state) => publicIncident(find(readMvp(state).incidents, id, 'Incident'))); },
     listNotificationEvents(reviewerId) { actor(reviewerId); return store.read((state) => readMvp(state).notificationEvents); },

@@ -71,6 +71,10 @@ test('trusted Discord submissions require only description and stay private befo
     reason: 'The report description is private and should not be copied verbatim.',
   }, reviewers[0].token)).body.error, 'private_report_copy');
   assert.equal((await invoke(server, 'POST', '/v1/discord/reports/status', { discordUserId: reporterDiscordId })).status, 401);
+  assert.equal((await invoke(server, 'POST', '/v1/discord/lead-notifications', { proposalId: 'x', delivered: true })).status, 401);
+  assert.equal((await invoke(server, 'POST', '/v1/discord/lead-notifications', { proposalId: '00000000-0000-0000-0000-000000000000', delivered: true }, botToken)).status, 404);
+  assert.equal((await invoke(server, 'POST', '/v1/mvp/proposals/x/evaluate')).status, 401);
+  assert.equal((await invoke(server, 'POST', '/v1/mvp/proposals/00000000-0000-0000-0000-000000000000/evaluate', undefined, reviewers[0].token)).status, 404);
   const ownStatus = await invoke(server, 'POST', '/v1/discord/reports/status', { discordUserId: reporterDiscordId }, botToken);
   assert.deepEqual(ownStatus.body.reports.map((item) => item.id), [created.body.id]);
   assert.equal(JSON.stringify(ownStatus.body).includes(input.description), false);
@@ -218,7 +222,7 @@ test('under-investigation may open publicly with advice, while medium/low confir
   }
 });
 
-test('high confirmed incidents require Lead; the one-hour exception stays disabled without verified delivery', async () => {
+test('critical confirmed incidents require Lead; the bot-confirmed clock enables the one-hour fallback', async () => {
   const store = await Store.open();
   let time = '2026-10-03T00:00:00.000Z';
   const mvp = createMvpService(store, { reviewers, now: () => time });
@@ -236,15 +240,48 @@ test('high confirmed incidents require Lead; the one-hour exception stays disabl
   const second = await mvp.approveProposal(proposed.id, 'reviewer-b');
   assert.equal(second.status, 'pending');
   assert.equal(mvp.listIncidents().length, 0);
-  const lead = await mvp.approveProposal(proposed.id, 'lead');
-  assert.equal(lead.status, 'published');
-  assert.equal(lead.publishedIncident.id, 'SEN-0001');
-  await assert.rejects(mvp.proposeFromIncident('SEN-0001', 'reviewer-a', {
+  // Even past one hour, a bot-confirmed notification is required before the fallback runs.
+  time = '2026-10-03T02:02:00.000Z';
+  assert.equal((await mvp.evaluateProposal(proposed.id, 'reviewer-a')).status, 'pending');
+  // A failed notification must not start the clock.
+  assert.deepEqual(await mvp.recordLeadNotification({ proposalId: proposed.id, delivered: false }),
+    { proposalId: proposed.id, delivered: false, leadNotifiedAt: null });
+  time = '2026-10-03T03:03:00.000Z';
+  assert.equal((await mvp.evaluateProposal(proposed.id, 'reviewer-a')).status, 'pending');
+  // The trusted bot confirms the Lead was notified; the one-hour clock starts now.
+  time = '2026-10-03T04:00:00.000Z';
+  assert.deepEqual(await mvp.recordLeadNotification({ proposalId: proposed.id, delivered: true }),
+    { proposalId: proposed.id, delivered: true, leadNotifiedAt: '2026-10-03T04:00:00.000Z' });
+  assert.equal((await mvp.evaluateProposal(proposed.id, 'reviewer-a')).status, 'pending');
+  // After the confirmed clock elapses, two non-Lead approvals publish pending Lead review.
+  time = '2026-10-03T05:00:00.000Z';
+  const fallback = await mvp.evaluateProposal(proposed.id, 'reviewer-b');
+  assert.equal(fallback.status, 'published');
+  assert.equal(fallback.publishedIncident.id, 'SEN-0001');
+  assert.equal(fallback.publishedIncident.pendingLeadReview, true);
+  assert.equal(fallback.publishedIncident.leadNotifiedAt, '2026-10-03T04:00:00.000Z');
+
+  // The normal path still publishes only when the Lead approves without any fallback.
+  const report2 = await mvp.submitDiscord({ description: 'Another fictional critical incident report.', evidence: [transactionEvidence] }, reporterDiscordId);
+  const evidenceId2 = mvp.getReport(report2.id, 'reviewer-a').evidence[0].id;
+  const proposed2 = await mvp.proposeFromReport(report2.id, 'reviewer-a', {
     ...publicNarrative,
-    level: 'false_alarm', severity: 'critical', title: 'Fictional false alarm',
-    advice: 'This fictional alert is being reviewed again.', reason: 'This transition has no agreed approval rule yet.',
-  }), { code: 'policy_unconfirmed' });
-  const resolution = await mvp.proposeFromIncident('SEN-0001', 'reviewer-a', {
+    level: 'confirmed_incident', severity: 'critical', title: 'Fictional critical incident two',
+    advice: 'Do not interact with the fictional app until official confirmation is available.',
+    reason: 'The normal Lead quorum path is verified without any fallback clock.',
+    publicEvidenceIds: [evidenceId2],
+  });
+  time = '2026-10-03T06:00:00.000Z';
+  await mvp.recordLeadNotification({ proposalId: proposed2.id, delivered: true });
+  await mvp.approveProposal(proposed2.id, 'reviewer-b');
+  assert.equal((await mvp.evaluateProposal(proposed2.id, 'reviewer-a')).status, 'pending');
+  const lead = await mvp.approveProposal(proposed2.id, 'lead');
+  assert.equal(lead.status, 'published');
+  assert.equal(lead.publishedIncident.id, 'SEN-0002');
+  assert.equal(lead.publishedIncident.pendingLeadReview, false);
+  assert.equal(lead.publishedIncident.leadNotifiedAt, '2026-10-03T06:00:00.000Z');
+  // Critical resolution still requires the Lead.
+  const resolution = await mvp.proposeFromIncident('SEN-0002', 'reviewer-a', {
     ...publicNarrative,
     level: 'resolved', severity: 'critical', title: 'Fictional incident resolved',
     advice: 'Review the official project update before resuming activity.',
@@ -252,7 +289,91 @@ test('high confirmed incidents require Lead; the one-hour exception stays disabl
   });
   assert.equal(resolution.leadRequired, true);
   assert.equal((await mvp.approveProposal(resolution.id, 'lead')).status, 'published');
-  assert.equal(mvp.getIncident('SEN-0001').level, 'resolved');
+  assert.equal(mvp.getIncident('SEN-0002').level, 'resolved');
+  // A closed incident cannot be relabeled.
+  await assert.rejects(mvp.proposeFromIncident('SEN-0002', 'reviewer-a', {
+    ...publicNarrative,
+    level: 'false_alarm', severity: 'critical', title: 'Fictional false alarm',
+    advice: 'This fictional alert is being reviewed again.', reason: 'A closed incident must not change through this draft API.',
+  }), { code: 'invalid_transition' });
+});
+
+test('public false alarms need two reviewers without the Lead; medium/low resolutions need one', async () => {
+  const store = await Store.open();
+  const mvp = createMvpService(store, { reviewers });
+  const report = await mvp.submitDiscord({ description: 'A fictional report that review finds harmless.', evidence: [transactionEvidence] }, reporterDiscordId);
+  // A false alarm cannot come from an unpublished report.
+  await assert.rejects(mvp.proposeFromReport(report.id, 'reviewer-a', {
+    ...publicNarrative,
+    level: 'false_alarm', severity: 'medium', title: 'Fictional premature false alarm',
+    advice: 'No action is needed for this fictional unconfirmed claim.',
+    reason: 'A false alarm requires a published incident to close first.',
+  }), { code: 'invalid_transition' });
+  const evidenceId = mvp.getReport(report.id, 'reviewer-a').evidence[0].id;
+  const proposed = await mvp.proposeFromReport(report.id, 'reviewer-a', {
+    ...publicNarrative,
+    level: 'confirmed_incident', severity: 'medium', title: 'Fictional medium incident',
+    advice: 'Check the official updates and avoid the affected fictional application.',
+    reason: 'Two reviewers manually inspected the fictional evidence for this case.',
+    publicEvidenceIds: [evidenceId],
+  });
+  await mvp.approveProposal(proposed.id, 'reviewer-b');
+  // The closure must retain the published severity.
+  await assert.rejects(mvp.proposeFromIncident('SEN-0001', 'reviewer-a', {
+    ...publicNarrative,
+    level: 'false_alarm', severity: 'critical', title: 'Fictional mismatched false alarm',
+    advice: 'No action is needed for this fictional unconfirmed claim.',
+    reason: 'The closure severity must match the published incident severity.',
+  }), { code: 'invalid_input' });
+  const alarm = await mvp.proposeFromIncident('SEN-0001', 'reviewer-a', {
+    ...publicNarrative,
+    level: 'false_alarm', severity: 'medium', title: 'Fictional incident retracted',
+    advice: 'No action is needed; the fictional report was reviewed as harmless.',
+    reason: 'Two reviewers confirmed the fictional report describes no real threat.',
+  });
+  assert.equal(alarm.requiredApprovals, 2);
+  assert.equal(alarm.leadRequired, false);
+  // The Lead is not required but may still cast one of the two votes.
+  const published = await mvp.approveProposal(alarm.id, 'lead');
+  assert.equal(published.status, 'published');
+  assert.equal(mvp.getIncident('SEN-0001').level, 'false_alarm');
+  assert.equal(mvp.getIncident('SEN-0001').pendingLeadReview, false);
+  // Both the confirmed incident and its false-alarm closure created unsent drafts.
+  assert.equal(mvp.listNotificationEvents('reviewer-a').length, 2);
+  await assert.rejects(mvp.recordLeadNotification({ proposalId: alarm.id, delivered: true }), { code: 'invalid_transition' });
+  // Only Lead-required proposals accept the bot's notification confirmation.
+  const report3 = await mvp.submitDiscord({ description: 'A third fictional report for a threat warning.', evidence: [transactionEvidence] }, reporterDiscordId);
+  const evidenceId3 = mvp.getReport(report3.id, 'reviewer-a').evidence[0].id;
+  const pending = await mvp.proposeFromReport(report3.id, 'reviewer-a', {
+    ...publicNarrative,
+    level: 'credible_threat', severity: 'high', title: 'Fictional pending threat',
+    advice: 'Pause interactions with the fictional application and inspect official updates.',
+    reason: 'The notification confirmation only applies to Lead-required proposals.',
+    publicEvidenceIds: [evidenceId3],
+  });
+  await assert.rejects(mvp.recordLeadNotification({ proposalId: pending.id, delivered: true }), { code: 'lead_not_required' });
+
+  // Medium/low resolution now needs any one reviewer, without the Lead.
+  const report2 = await mvp.submitDiscord({ description: 'A second fictional medium confirmed case.', evidence: [transactionEvidence] }, reporterDiscordId);
+  const evidenceId2 = mvp.getReport(report2.id, 'reviewer-a').evidence[0].id;
+  const proposed2 = await mvp.proposeFromReport(report2.id, 'reviewer-a', {
+    ...publicNarrative,
+    level: 'confirmed_incident', severity: 'low', title: 'Fictional low incident',
+    advice: 'Check the official updates and avoid the affected fictional application.',
+    reason: 'Two reviewers manually inspected the fictional evidence for this case.',
+    publicEvidenceIds: [evidenceId2],
+  });
+  await mvp.approveProposal(proposed2.id, 'reviewer-b');
+  const resolution = await mvp.proposeFromIncident('SEN-0002', 'reviewer-a', {
+    ...publicNarrative,
+    level: 'resolved', severity: 'low', title: 'Fictional low incident resolved',
+    advice: 'Review the official project update before resuming activity.',
+    reason: 'The fictional response completed and the team reviewed the outcome.',
+  });
+  assert.equal(resolution.requiredApprovals, 1);
+  assert.equal(resolution.leadRequired, false);
+  assert.equal(resolution.status, 'published');
+  assert.equal(mvp.getIncident('SEN-0002').level, 'resolved');
 });
 
 test('pending proposal votes are pinned to the configured reviewer roster', async () => {

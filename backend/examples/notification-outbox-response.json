@@ -1,0 +1,20 @@
+{
+  "events": [
+    {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "kind": "published",
+      "createdAt": "2026-10-01T00:10:00.000Z",
+      "deliveryState": "draft",
+      "alertId": "11111111-1111-4111-8111-111111111111",
+      "version": 1,
+      "status": "verified",
+      "classification": "credible_threat",
+      "chainId": 10143,
+      "contractAddress": "0x1111111111111111111111111111111111111111",
+      "title": "Demo: suspicious contract activity",
+      "advice": "Avoid interacting with this fictional contract during the demonstration.",
+      "disclaimer": "Independent community project · Not affiliated with Monad Foundation · Not financial advice",
+      "alertPath": "/v1/alerts/11111111-1111-4111-8111-111111111111"
+    }
+  ]
+}

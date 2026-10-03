@@ -1,0 +1,3 @@
+# Discord bot (MVP)
+
+Ollie confirmed on 3 October that Discord is the only bot channel for the MVP; Telegram and X follow after the hackathon. He plans to deliver the bot here. The MVP backend provides a bot-authenticated report submission and status lookup plus an unsent Discord notification outbox; see [`backend/mvp-openapi.json`](../backend/mvp-openapi.json). The bot must take `discordUserId` from a verified Discord interaction and must not treat a typed name as identity. The backend trusts the authenticated bot adapter and does not verify Discord interaction signatures itself. Delivery, subscriptions, retries, and production authentication still need integration work; no external messages are sent by the current code.

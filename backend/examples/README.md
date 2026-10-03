@@ -1,6 +1,17 @@
 # API examples for frontend and bot integration
 
-These fictional JSON files show the current API shapes. The IDs and timestamps are illustrative; a running server creates its own IDs. The interface is still a draft, and the backend serves only on localhost.
+These fictional JSON files show the two **separate** local API modes. The IDs and timestamps are illustrative; a running server creates its own IDs. The backend serves only on localhost. New bot and frontend work should use [`mvp-openapi.json`](../mvp-openapi.json) and the MVP examples below. The old `openapi.json` and legacy examples only run when MVP mode is disabled.
+
+| File | MVP endpoint | Audience |
+| --- | --- | --- |
+| [`discord-report-request.json`](discord-report-request.json) | `POST /v1/discord/reports` request | Trusted Discord bot adapter only |
+| [`mvp-private-report.json`](mvp-private-report.json) | `GET /v1/mvp/reports/:id` illustrative private response | Reviewer UI only |
+| [`mvp-publication-request.json`](mvp-publication-request.json) | `POST /v1/mvp/reports/:id/publication` request | Reviewer UI only |
+| [`mvp-incidents-response.json`](mvp-incidents-response.json) | `GET /v1/mvp/incidents` illustrative response after two approvals | Public frontend |
+
+The bot must extract `discordUserId` from a Discord interaction and authenticate with the **server-side** `DISCORD_BOT_TOKEN`. It is an assertion by the trusted bot; this backend does not verify Discord signatures. The example publication request uses the evidence ID from the private report. A higher-level publication remains pending until independent configured reviewer tokens approve it. The public response omits reporter identity, raw report text, suspicious target URLs, and private evidence notes. Do not use the old `/v1/reports` route for MVP submissions; it is disabled when the MVP service is enabled.
+
+## Legacy local demo examples
 
 | File | Endpoint | Audience |
 | --- | --- | --- |

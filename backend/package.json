@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node src/server.mjs",
     "test": "node --test",
-    "demo": "node scripts/demo.mjs"
+    "demo": "node scripts/demo.mjs",
+    "demo:mvp": "node scripts/mvp-demo.mjs"
   }
 }

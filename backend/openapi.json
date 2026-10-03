@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Monad Vanguard Sentinel local prototype API",
+    "title": "Monad Vanguard Sentinel legacy local demo API",
     "version": "0.1.0",
-    "description": "Draft integration contract for a local, manually reviewed suspicious-contract workflow. Team approval is pending."
+    "description": "Legacy single-reviewer contract for a local suspicious-contract demo. Disabled with HTTP 410 when the separate Discord MVP workflow is configured. New frontend and Discord integrations must use mvp-openapi.json instead."
   },
   "servers": [{ "url": "http://127.0.0.1:8787" }],
   "paths": {

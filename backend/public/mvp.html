@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sentinel — Public Security Incidents</title>
+  <link rel="stylesheet" href="/mvp.css">
+</head>
+<body>
+  <header>
+    <h1>Sentinel</h1>
+    <p class="tagline">Community security incident feed for the Monad ecosystem — reviewed and published by a three-reviewer quorum.</p>
+  </header>
+  <main>
+    <section id="incidents" aria-live="polite">
+      <h2>Published incidents</h2>
+      <p id="loading" class="muted">Loading published incidents…</p>
+    </section>
+  </main>
+  <footer>
+    <p class="disclaimer">Independent community project · Not affiliated with Monad Foundation · Not financial advice</p>
+    <p class="fineprint">Demonstration content. Entries are fictional and shown for review purposes only; nothing here is real security intelligence. Read-only, no login required. Machine-readable data: <code>/v1/mvp/incidents</code> · API spec: <code>/mvp-openapi.json</code></p>
+  </footer>
+  <script src="/mvp-app.js"></script>
+</body>
+</html>

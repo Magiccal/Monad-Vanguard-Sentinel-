@@ -32,7 +32,12 @@ function invoke(server, method, url, body, token) {
     const res = {
       headersSent: false,
       writeHead(status) { this.status = status; this.headersSent = true; },
-      end(payload) { resolve({ status: this.status, body: JSON.parse(payload) }); },
+      end(payload) {
+        const raw = payload === undefined ? '' : payload.toString();
+        let parsed;
+        try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+        resolve({ status: this.status, body: parsed });
+      },
     };
     server.emit('request', req, res);
   });
@@ -50,8 +55,10 @@ test('trusted Discord submissions require only description and stay private befo
   assert.equal((await invoke(server, 'POST', '/v1/discord/reports', input)).status, 401);
   assert.equal((await invoke(server, 'POST', '/v1/reports', {}, botToken)).status, 410);
   assert.equal((await invoke(server, 'GET', '/v1/alerts')).status, 410);
-  assert.equal((await invoke(server, 'GET', '/')).status, 410);
+  assert.equal((await invoke(server, 'GET', '/')).status, 200);
   assert.equal((await invoke(server, 'GET', '/openapi.json')).status, 410);
+  assert.equal((await invoke(server, 'GET', '/mvp-openapi.json')).status, 200);
+  assert.equal((await invoke(server, 'GET', '/mvp.css')).status, 200);
   assert.equal((await invoke(server, 'POST', '/v1/discord/reports', { ...input, reporterName: 'fake' }, botToken)).status, 400);
   const created = await invoke(server, 'POST', '/v1/discord/reports', input, botToken);
   assert.equal(created.status, 201);
@@ -67,7 +74,7 @@ test('trusted Discord submissions require only description and stay private befo
   assert.equal((await invoke(server, 'POST', `/v1/mvp/reports/${created.body.id}/publication`, {
     ...publicNarrative, summary: input.description,
     level: 'informational', severity: null, title: 'Fictional suspicious claim reported',
-    advice: 'Check official channels for updates before interacting with the claim.',
+    advice: ['Check official channels for updates before interacting with the claim.'],
     reason: 'The report description is private and should not be copied verbatim.',
   }, reviewers[0].token)).body.error, 'private_report_copy');
   assert.equal((await invoke(server, 'POST', '/v1/discord/reports/status', { discordUserId: reporterDiscordId })).status, 401);
@@ -83,7 +90,7 @@ test('trusted Discord submissions require only description and stay private befo
   const proposal = await invoke(server, 'POST', `/v1/mvp/reports/${created.body.id}/publication`, {
     ...publicNarrative,
     level: 'informational', severity: null, title: 'Fictional suspicious claim reported',
-    advice: 'Check the official project channels and avoid connecting a wallet to that link.',
+    advice: ['Check the official project channels and avoid connecting a wallet to that link.'],
     reason: 'This is a community-submitted lead without independent confirmation.',
   }, reviewers[0].token);
   assert.equal(proposal.status, 200);
@@ -93,7 +100,8 @@ test('trusted Discord submissions require only description and stay private befo
   assert.equal(publicIncident.level, 'informational');
   assert.equal(publicIncident.severity, null);
   assert.equal(publicIncident.approvalMode, 'three_reviewer_quorum');
-  assert.match(publicIncident.advice, /Check the official/);
+  assert.match(publicIncident.advice[0], /Check the official/);
+  assert.ok(publicIncident.advice.length >= 1 && publicIncident.advice.length <= 3);
   assert.equal(JSON.stringify(publicIncident).includes(reporterDiscordId), false);
   assert.equal(JSON.stringify(publicIncident).includes('token=demo'), false);
   assert.equal(JSON.stringify(publicIncident).includes(input.description), false);
@@ -111,13 +119,13 @@ test('two independent reviewers publish credible threats; duplicate and self app
   await assert.rejects(mvp.proposeFromReport(report.id, 'reviewer-a', {
     ...publicNarrative,
     level: 'credible_threat', severity: 'high', title: 'Fictional wallet drain warning',
-    advice: 'Pause interactions with the fictional application and inspect official updates.',
+    advice: ['Pause interactions with the fictional application and inspect official updates.'],
     reason: 'A warning without a public source cannot be published.',
   }), { code: 'evidence_required' });
   const proposedResponse = await invoke(server, 'POST', `/v1/mvp/reports/${report.id}/publication`, {
     ...publicNarrative,
     level: 'credible_threat', severity: 'high', title: 'Fictional wallet drain warning',
-    advice: 'Pause interactions with the fictional application and inspect official updates.',
+    advice: ['Pause interactions with the fictional application and inspect official updates.'],
     reason: 'Reviewers found sufficiently credible fictional evidence for a warning.',
     publicEvidenceIds: [evidenceId],
     reviewerId: 'lead',
@@ -139,7 +147,7 @@ test('two independent reviewers publish credible threats; duplicate and self app
   await assert.rejects(mvp.proposeFromIncident('SEN-0001', 'reviewer-a', {
     ...publicNarrative,
     level: 'under_investigation', severity: 'high', title: 'Fictional updated warning',
-    advice: 'Click https://bad.example.test now to verify your wallet.',
+    advice: ['Click https://bad.example.test now to verify your wallet.'],
     reason: 'A public action line must not embed a potentially dangerous URL.',
   }), { code: 'unsafe_public_text' });
 
@@ -149,13 +157,13 @@ test('two independent reviewers publish credible threats; duplicate and self app
   await assert.rejects(mvp.proposeFromReport(own.id, 'reviewer-a', {
     ...publicNarrative,
     level: 'informational', title: 'Fictional reviewer-owned report',
-    advice: 'Check the official project channels for additional information.',
+    advice: ['Check the official project channels for additional information.'],
     reason: 'A reviewer cannot publish their own submitted report.',
   }), { code: 'self_review' });
   const ownProposal = await mvp.proposeFromReport(own.id, 'reviewer-b', {
     ...publicNarrative,
     level: 'credible_threat', severity: 'medium', title: 'Fictional reviewer-owned report',
-    advice: 'Check the official project channels for additional information.',
+    advice: ['Check the official project channels for additional information.'],
     reason: 'A different reviewer proposed this report for review.',
     publicEvidenceIds: [ownEvidenceId],
   });
@@ -177,7 +185,7 @@ test('public evidence requires explicit safe selection and cannot leak suspiciou
   const input = {
     ...publicNarrative,
     level: 'credible_threat', severity: 'medium', title: 'Fictional claim site warning',
-    advice: 'Do not connect a wallet to the suspicious link and check project updates.',
+    advice: ['Do not connect a wallet to the suspicious link and check project updates.'],
     reason: 'Reviewers must inspect the fictional official notice before publication.',
   };
   await assert.rejects(mvp.proposeFromReport(report.id, 'reviewer-a', { ...input, publicEvidenceIds: [unsafe.id] }), { code: 'unsafe_public_evidence' });
@@ -197,7 +205,7 @@ test('under-investigation may open publicly with advice, while medium/low confir
   const opened = await mvp.proposeFromReport(investigation.id, 'reviewer-a', {
     ...publicNarrative,
     level: 'under_investigation', severity: 'medium', title: 'Fictional lead under review',
-    advice: 'Pause any interaction with the claim and check official project updates.',
+    advice: ['Pause any interaction with the claim and check official project updates.'],
     reason: 'The lead is unconfirmed and is being checked by the review team.',
   });
   assert.equal(opened.status, 'published');
@@ -211,7 +219,7 @@ test('under-investigation may open publicly with advice, while medium/low confir
     const proposed = await mvp.proposeFromReport(report.id, 'reviewer-a', {
       ...publicNarrative,
       level: 'confirmed_incident', severity, title: `Fictional ${severity} confirmed case`,
-      advice: 'Check the official updates and avoid the affected fictional application.',
+      advice: ['Check the official updates and avoid the affected fictional application.'],
       reason: 'Two reviewers manually inspected the fictional evidence for this case.',
       publicEvidenceIds: [evidenceId],
     });
@@ -231,7 +239,7 @@ test('critical confirmed incidents require Lead; the bot-confirmed clock enables
   const proposed = await mvp.proposeFromReport(report.id, 'reviewer-a', {
     ...publicNarrative,
     level: 'confirmed_incident', severity: 'critical', title: 'Fictional critical incident',
-    advice: 'Do not interact with the fictional app until official confirmation is available.',
+    advice: ['Do not interact with the fictional app until official confirmation is available.'],
     reason: 'Fictional evidence was reviewed for this quorum and Lead test.',
     publicEvidenceIds: [evidenceId],
   });
@@ -267,7 +275,7 @@ test('critical confirmed incidents require Lead; the bot-confirmed clock enables
   const proposed2 = await mvp.proposeFromReport(report2.id, 'reviewer-a', {
     ...publicNarrative,
     level: 'confirmed_incident', severity: 'critical', title: 'Fictional critical incident two',
-    advice: 'Do not interact with the fictional app until official confirmation is available.',
+    advice: ['Do not interact with the fictional app until official confirmation is available.'],
     reason: 'The normal Lead quorum path is verified without any fallback clock.',
     publicEvidenceIds: [evidenceId2],
   });
@@ -284,7 +292,7 @@ test('critical confirmed incidents require Lead; the bot-confirmed clock enables
   const resolution = await mvp.proposeFromIncident('SEN-0002', 'reviewer-a', {
     ...publicNarrative,
     level: 'resolved', severity: 'critical', title: 'Fictional incident resolved',
-    advice: 'Review the official project update before resuming activity.',
+    advice: ['Review the official project update before resuming activity.'],
     reason: 'The fictional response completed and the team reviewed the outcome.',
   });
   assert.equal(resolution.leadRequired, true);
@@ -294,8 +302,44 @@ test('critical confirmed incidents require Lead; the bot-confirmed clock enables
   await assert.rejects(mvp.proposeFromIncident('SEN-0002', 'reviewer-a', {
     ...publicNarrative,
     level: 'false_alarm', severity: 'critical', title: 'Fictional false alarm',
-    advice: 'This fictional alert is being reviewed again.', reason: 'A closed incident must not change through this draft API.',
+    advice: ['This fictional alert is being reviewed again.'], reason: 'A closed incident must not change through this draft API.',
   }), { code: 'invalid_transition' });
+});
+
+test('what-to-do advice requires 1-3 distinct action bullets; false alarms use the fixed bullet', async () => {
+  const store = await Store.open();
+  const mvp = createMvpService(store, { reviewers });
+  const report = await mvp.submitDiscord({ description: 'A fictional report used to exercise advice bullet rules.', evidence: [transactionEvidence] }, reporterDiscordId);
+  const evidenceId = mvp.getReport(report.id, 'reviewer-a').evidence[0].id;
+  const base = {
+    ...publicNarrative,
+    level: 'informational', severity: null, title: 'Fictional advice bullet check',
+    reason: 'Advice bullet validation is checked with fictional content.',
+    publicEvidenceIds: [evidenceId],
+  };
+  // Zero, four, and duplicate bullets are rejected.
+  await assert.rejects(mvp.proposeFromReport(report.id, 'reviewer-a', { ...base, advice: [] }), { code: 'invalid_input' });
+  await assert.rejects(mvp.proposeFromReport(report.id, 'reviewer-a', {
+    ...base, advice: ['First fictional action bullet for readers.', 'Second fictional action bullet for readers.', 'Third fictional action bullet for readers.', 'Fourth fictional action bullet for readers.'],
+  }), { code: 'invalid_input' });
+  await assert.rejects(mvp.proposeFromReport(report.id, 'reviewer-a', {
+    ...base, advice: ['Check official channels before interacting.', 'check official channels before interacting.'],
+  }), { code: 'invalid_input' });
+  // One bullet publishes and is reflected on the public incident.
+  await mvp.proposeFromReport(report.id, 'reviewer-a', { ...base, advice: ['Check official channels before interacting with anything.'] });
+  assert.deepEqual(mvp.getIncident('SEN-0001').advice, ['Check official channels before interacting with anything.']);
+  // Three distinct bullets are accepted.
+  await mvp.proposeFromIncident('SEN-0001', 'reviewer-a', {
+    ...base, title: 'Fictional three-bullet check',
+    advice: ['First fictional action bullet for readers.', 'Second fictional action bullet for readers.', 'Third fictional action bullet for readers.'],
+  });
+  assert.equal(mvp.getIncident('SEN-0001').advice.length, 3);
+  // A false alarm must use the exact fixed bullet.
+  const closure = { ...base, level: 'false_alarm', severity: null, title: 'Fictional fixed-bullet check', reason: 'The fixed false-alarm bullet is validated here.' };
+  await assert.rejects(mvp.proposeFromIncident('SEN-0001', 'reviewer-a', { ...closure, advice: ['No action is needed for this fictional claim.'] }), { code: 'invalid_input' });
+  const alarm = await mvp.proposeFromIncident('SEN-0001', 'reviewer-a', { ...closure, advice: ['No action needed.'] });
+  assert.equal(alarm.requiredApprovals, 2);
+  assert.deepEqual(mvp.getProposal(alarm.id, 'reviewer-a').advice, ['No action needed.']);
 });
 
 test('public false alarms need two reviewers without the Lead; medium/low resolutions need one', async () => {
@@ -306,14 +350,14 @@ test('public false alarms need two reviewers without the Lead; medium/low resolu
   await assert.rejects(mvp.proposeFromReport(report.id, 'reviewer-a', {
     ...publicNarrative,
     level: 'false_alarm', severity: 'medium', title: 'Fictional premature false alarm',
-    advice: 'No action is needed for this fictional unconfirmed claim.',
+    advice: ['No action is needed for this fictional unconfirmed claim.'],
     reason: 'A false alarm requires a published incident to close first.',
   }), { code: 'invalid_transition' });
   const evidenceId = mvp.getReport(report.id, 'reviewer-a').evidence[0].id;
   const proposed = await mvp.proposeFromReport(report.id, 'reviewer-a', {
     ...publicNarrative,
     level: 'confirmed_incident', severity: 'medium', title: 'Fictional medium incident',
-    advice: 'Check the official updates and avoid the affected fictional application.',
+    advice: ['Check the official updates and avoid the affected fictional application.'],
     reason: 'Two reviewers manually inspected the fictional evidence for this case.',
     publicEvidenceIds: [evidenceId],
   });
@@ -322,13 +366,13 @@ test('public false alarms need two reviewers without the Lead; medium/low resolu
   await assert.rejects(mvp.proposeFromIncident('SEN-0001', 'reviewer-a', {
     ...publicNarrative,
     level: 'false_alarm', severity: 'critical', title: 'Fictional mismatched false alarm',
-    advice: 'No action is needed for this fictional unconfirmed claim.',
+    advice: ['No action is needed for this fictional unconfirmed claim.'],
     reason: 'The closure severity must match the published incident severity.',
   }), { code: 'invalid_input' });
   const alarm = await mvp.proposeFromIncident('SEN-0001', 'reviewer-a', {
     ...publicNarrative,
     level: 'false_alarm', severity: 'medium', title: 'Fictional incident retracted',
-    advice: 'No action is needed; the fictional report was reviewed as harmless.',
+    advice: ['No action needed.'],
     reason: 'Two reviewers confirmed the fictional report describes no real threat.',
   });
   assert.equal(alarm.requiredApprovals, 2);
@@ -347,7 +391,7 @@ test('public false alarms need two reviewers without the Lead; medium/low resolu
   const pending = await mvp.proposeFromReport(report3.id, 'reviewer-a', {
     ...publicNarrative,
     level: 'credible_threat', severity: 'high', title: 'Fictional pending threat',
-    advice: 'Pause interactions with the fictional application and inspect official updates.',
+    advice: ['Pause interactions with the fictional application and inspect official updates.'],
     reason: 'The notification confirmation only applies to Lead-required proposals.',
     publicEvidenceIds: [evidenceId3],
   });
@@ -359,7 +403,7 @@ test('public false alarms need two reviewers without the Lead; medium/low resolu
   const proposed2 = await mvp.proposeFromReport(report2.id, 'reviewer-a', {
     ...publicNarrative,
     level: 'confirmed_incident', severity: 'low', title: 'Fictional low incident',
-    advice: 'Check the official updates and avoid the affected fictional application.',
+    advice: ['Check the official updates and avoid the affected fictional application.'],
     reason: 'Two reviewers manually inspected the fictional evidence for this case.',
     publicEvidenceIds: [evidenceId2],
   });
@@ -367,7 +411,7 @@ test('public false alarms need two reviewers without the Lead; medium/low resolu
   const resolution = await mvp.proposeFromIncident('SEN-0002', 'reviewer-a', {
     ...publicNarrative,
     level: 'resolved', severity: 'low', title: 'Fictional low incident resolved',
-    advice: 'Review the official project update before resuming activity.',
+    advice: ['Review the official project update before resuming activity.'],
     reason: 'The fictional response completed and the team reviewed the outcome.',
   });
   assert.equal(resolution.requiredApprovals, 1);
@@ -384,7 +428,7 @@ test('pending proposal votes are pinned to the configured reviewer roster', asyn
   const proposed = await original.proposeFromReport(report.id, 'reviewer-a', {
     ...publicNarrative,
     level: 'credible_threat', severity: 'low', title: 'Fictional roster review',
-    advice: 'Check the project channels while reviewers investigate the claim.',
+    advice: ['Check the project channels while reviewers investigate the claim.'],
     reason: 'Fictional evidence was selected for the reviewer-roster change test.',
     publicEvidenceIds: [evidenceId],
   });
@@ -398,7 +442,7 @@ test('pending proposal votes are pinned to the configured reviewer roster', asyn
   const replacement = await changed.proposeFromReport(report.id, 'lead', {
     ...publicNarrative,
     level: 'credible_threat', severity: 'low', title: 'Fictional roster review',
-    advice: 'Check the project channels while reviewers investigate the claim.',
+    advice: ['Check the project channels while reviewers investigate the claim.'],
     reason: 'Fictional evidence was re-evaluated under the current reviewer roster.',
     publicEvidenceIds: [evidenceId],
   });
@@ -417,7 +461,7 @@ test('MVP report and incident IDs are allocated atomically and persist beside le
     const proposals = await Promise.all(receipts.map((item, index) => mvp.proposeFromReport(item.id, 'reviewer-a', {
       ...publicNarrative,
       level: 'informational', severity: null, title: `Fictional lead number ${index + 1}`,
-      advice: 'Check official channels before interacting with any suspicious message.',
+      advice: ['Check official channels before interacting with any suspicious message.'],
       reason: 'This fictional lead is published by the local single-reviewer demo.',
     })));
     assert.deepEqual(proposals.map((item) => item.publishedIncident.id), Array.from({ length: 12 }, (_, index) => `SEN-${String(index + 1).padStart(4, '0')}`));

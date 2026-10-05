@@ -4,7 +4,7 @@
   "title": "Fictional claim-link impersonation warning",
   "summary": "A fictional claim page is impersonating a project and asking visitors to connect wallets.",
   "verificationNote": "Two reviewers compared the report with a fictional official notice before publication.",
-  "advice": "Avoid the claim link and check the project's official channels for updates.",
+  "advice": ["Avoid the claim link and check the project's official channels for updates."],
   "reason": "Two reviewers should compare the submitted lead against the fictional official notice before publication.",
   "publicEvidenceIds": ["11111111-1111-4111-8111-111111111111"]
 }

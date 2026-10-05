@@ -20,7 +20,7 @@ const proposed = await mvp.proposeFromReport(report.id, reviewers[0].id, {
   level: 'credible_threat', severity: 'high', title: 'Fictional claim link warning',
   summary: 'A fictional claim page is impersonating the project and asking visitors to connect wallets.',
   verificationNote: 'Two reviewers compared the report with a fictional project notice; this is a local demo.',
-  advice: 'Avoid the claim link and check the official project channels for updates.',
+  advice: ['Avoid the claim link and check the official project channels for updates.'],
   reason: 'Two reviewers are checking a fictional official notice before publication.',
   publicEvidenceIds: [evidenceId],
 });

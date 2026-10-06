@@ -1,0 +1,28 @@
+{
+  "alerts": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "status": "verified",
+      "classification": "credible_threat",
+      "chainId": 10143,
+      "contractAddress": "0x1111111111111111111111111111111111111111",
+      "title": "Demo: suspicious contract activity",
+      "advice": "Avoid interacting with this fictional contract during the demonstration.",
+      "disclaimer": "Independent community project · Not affiliated with Monad Foundation · Not financial advice",
+      "evidence": [
+        {
+          "id": "22222222-2222-4222-8222-222222222222",
+          "kind": "transaction",
+          "txHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "note": "Fictional transaction hash used only for API integration testing.",
+          "addedAt": "2026-10-01T00:00:00.000Z"
+        }
+      ],
+      "onchainObservation": null,
+      "publishedAt": "2026-10-01T00:10:00.000Z",
+      "updatedAt": "2026-10-01T00:10:00.000Z",
+      "version": 1,
+      "corrections": []
+    }
+  ]
+}

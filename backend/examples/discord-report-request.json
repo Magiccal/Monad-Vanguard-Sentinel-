@@ -1,0 +1,11 @@
+{
+  "discordUserId": "444444444444444444",
+  "description": "A fictional project account posted a suspicious claim link. I did not connect my wallet.",
+  "incidentType": "phishing",
+  "targets": [
+    { "kind": "url", "value": "https://claim.example.test/bonus?campaign=fictional" }
+  ],
+  "evidence": [
+    { "kind": "official_statement", "reference": "https://project.example.test/notices/fictional-warning", "note": "Fictional official notice for an integration example." }
+  ]
+}

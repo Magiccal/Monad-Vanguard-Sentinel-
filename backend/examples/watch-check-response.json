@@ -1,0 +1,20 @@
+{
+  "state": "scanned",
+  "observedAt": "2026-10-01T00:20:00.000Z",
+  "chainId": 10143,
+  "fromBlock": "0x9d",
+  "toBlock": "0x100",
+  "latestBlock": "0x100",
+  "hasMore": false,
+  "logCount": 1,
+  "duplicateCount": 0,
+  "samples": [
+    {
+      "txHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "blockNumber": "0xff",
+      "blockHash": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "logIndex": "0x1",
+      "topic0": null
+    }
+  ]
+}

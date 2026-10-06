@@ -31,6 +31,28 @@ function publicText(value, label, min, max, reporterDiscordId) {
   if (normalized.includes(reporterDiscordId)) fail(400, 'private_identity', `${label} must not expose the reporter's Discord ID`);
   return normalized;
 }
+// Ollie 2026-10-05 23:57: "What you should do" is 1-3 short action bullets, required
+// on every public level; false alarm always uses the single bullet "No action needed.".
+function adviceBullets(value, level, reporterDiscordId) {
+  if (level === 'false_alarm') {
+    const items = list(value, 'what-to-do advice', 3);
+    if (items.length !== 1 || items[0] !== 'No action needed.') {
+      fail(400, 'invalid_input', 'False-alarm publication requires the single advice bullet "No action needed."');
+    }
+    return ['No action needed.'];
+  }
+  if (!Array.isArray(value) || value.length < 1 || value.length > 3) {
+    fail(400, 'invalid_input', 'what-to-do advice must contain 1-3 short action bullets');
+  }
+  const seen = new Set();
+  return value.map((item) => {
+    const normalized = publicText(item, 'what-to-do advice', 10, 300, reporterDiscordId);
+    const key = normalized.toLocaleLowerCase();
+    if (seen.has(key)) fail(400, 'invalid_input', 'what-to-do advice bullets must be distinct');
+    seen.add(key);
+    return normalized;
+  });
+}
 function list(value, label, max) {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > max) fail(400, 'invalid_input', `${label} must contain at most ${max} items`);
@@ -238,7 +260,7 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
       level: data.level, severity, title: publicText(data.title, 'title', 10, 160, report.reporterDiscordId),
       summary,
       verificationNote: publicText(data.verificationNote, 'verification note', 20, 500, report.reporterDiscordId),
-      advice: publicText(data.advice, 'what-to-do advice', 10, 500, report.reporterDiscordId),
+      advice: adviceBullets(data.advice, data.level, report.reporterDiscordId),
       reason: text(data.reason, 'reason', 20, 1000),
       publicEvidence,
       status: 'pending', createdAt: at, policy: policy(data.level, severity, incident), rosterFingerprint,

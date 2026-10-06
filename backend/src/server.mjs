@@ -19,11 +19,14 @@ function respond(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-async function respondStatic(res, pathname) {
+async function respondStatic(res, pathname, mvpPage = false) {
   const files = {
-    '/': ['../public/index.html', 'text/html; charset=utf-8'],
+    '/': [mvpPage ? '../public/mvp.html' : '../public/index.html', 'text/html; charset=utf-8'],
     '/app.js': ['../public/app.js', 'text/javascript; charset=utf-8'],
     '/styles.css': ['../public/styles.css', 'text/css; charset=utf-8'],
+    '/mvp.html': ['../public/mvp.html', 'text/html; charset=utf-8'],
+    '/mvp-app.js': ['../public/mvp-app.js', 'text/javascript; charset=utf-8'],
+    '/mvp.css': ['../public/mvp.css', 'text/css; charset=utf-8'],
     '/openapi.json': ['../openapi.json', 'application/json; charset=utf-8'],
     '/mvp-openapi.json': ['../mvp-openapi.json', 'application/json; charset=utf-8'],
   };
@@ -85,11 +88,15 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
       const pathname = new URL(req.url, 'http://localhost').pathname;
       const segments = pathname.split('/').filter(Boolean);
 
-      if (mvp && ['/', '/app.js', '/styles.css', '/openapi.json'].includes(pathname)) {
+      if (mvp && ['/app.js', '/styles.css', '/openapi.json'].includes(pathname)) {
         throw new DomainError(410, 'legacy_demo_disabled', 'The old single-reviewer browser demo is disabled in MVP mode');
       }
-      if (req.method === 'GET' && ['/', '/app.js', '/styles.css', '/openapi.json', '/mvp-openapi.json'].includes(pathname)) {
-        return respondStatic(res, pathname);
+      // MVP mode serves the English public incidents page at / (read-only, no login).
+      const mvpPage = Boolean(mvp);
+      if (req.method === 'GET' && (mvpPage
+        ? ['/', '/mvp.html', '/mvp-app.js', '/mvp.css', '/mvp-openapi.json'].includes(pathname)
+        : ['/', '/app.js', '/styles.css', '/openapi.json', '/mvp-openapi.json'].includes(pathname))) {
+        return respondStatic(res, pathname, mvpPage);
       }
 
       if (req.method === 'GET' && pathname === '/health') {
@@ -266,8 +273,10 @@ async function main() {
   });
   const port = Number(process.env.PORT || '8787');
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be 1-65535');
-  server.listen(port, '127.0.0.1', () => {
-    console.log(`Sentinel backend demo listening at http://127.0.0.1:${port}`);
+  // HOST defaults to loopback; hosted environments bind 0.0.0.0 via HOST=0.0.0.0.
+  const host = process.env.HOST || '127.0.0.1';
+  server.listen(port, host, () => {
+    console.log(`Sentinel backend demo listening at http://${host}:${port}`);
   });
 }
 

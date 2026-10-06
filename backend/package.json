@@ -9,6 +9,7 @@
     "start": "node src/server.mjs",
     "test": "node --test",
     "demo": "node scripts/demo.mjs",
-    "demo:mvp": "node scripts/mvp-demo.mjs"
+    "demo:mvp": "node scripts/mvp-demo.mjs",
+    "seed": "node scripts/seed-demo.mjs"
   }
 }

@@ -1,0 +1,17 @@
+{
+  "name": "sentinel-discord-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "register": "node src/register.mjs"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "https-proxy-agent": "^9.1.0"
+  }
+}

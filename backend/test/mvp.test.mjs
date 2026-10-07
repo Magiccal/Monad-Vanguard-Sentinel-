@@ -306,6 +306,35 @@ test('critical confirmed incidents require Lead; the bot-confirmed clock enables
   }), { code: 'invalid_transition' });
 });
 
+test('the trusted bot can discover Lead-waiting proposals through the pending list', async () => {
+  const store = await Store.open();
+  const mvp = createMvpService(store, { reviewers });
+  const report = await mvp.submitDiscord({ description: 'Fictional critical incident for the pending list test.', evidence: [transactionEvidence] }, reporterDiscordId);
+  const evidenceId = mvp.getReport(report.id, 'reviewer-a').evidence[0].id;
+  const proposed = await mvp.proposeFromReport(report.id, 'reviewer-a', {
+    ...publicNarrative,
+    level: 'confirmed_incident', severity: 'critical', title: 'Fictional pending list incident',
+    advice: ['Do not interact with the fictional app until official confirmation is available.'],
+    reason: 'The bot pending-lead list is exercised for the Discord adapter.',
+    publicEvidenceIds: [evidenceId],
+  });
+  // Only one vote so far: nothing is waiting on the Lead yet.
+  assert.deepEqual(mvp.listPendingLeadProposals('reviewer-a'), []);
+  await mvp.approveProposal(proposed.id, 'reviewer-b');
+  const pending = mvp.listPendingLeadProposals('reviewer-b');
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].id, proposed.id);
+  assert.equal(pending[0].level, 'confirmed_incident');
+  assert.equal(pending[0].severity, 'critical');
+  assert.equal(pending[0].approvals, 2);
+  assert.equal(pending[0].requiredApprovals, 2);
+  assert.equal(pending[0].leadNotifiedAt, null);
+  // Published proposals never appear in the pending list again.
+  await mvp.recordLeadNotification({ proposalId: proposed.id, delivered: true });
+  await mvp.approveProposal(proposed.id, 'lead');
+  assert.deepEqual(mvp.listPendingLeadProposals('lead'), []);
+});
+
 test('what-to-do advice requires 1-3 distinct action bullets; false alarms use the fixed bullet', async () => {
   const store = await Store.open();
   const mvp = createMvpService(store, { reviewers });

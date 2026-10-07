@@ -390,6 +390,33 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
       });
     },
     getProposal(id, reviewerId) { actor(reviewerId); return store.read((state) => find(readMvp(state).proposals, id, 'Proposal')); },
+    // Trusted-bot discovery feed: pending proposals that have the required non-Lead
+    // votes but still wait on the Lead. The Discord adapter uses this to DM the Lead
+    // and then confirm the delivery attempt via recordLeadNotification, which is what
+    // starts (or deliberately does not start) the one-hour fallback clock.
+    listPendingLeadProposals(reviewerId) {
+      actor(reviewerId);
+      return store.read((state) => readMvp(state).proposals
+        .filter((proposal) => {
+          if (proposal.status !== 'pending' || !proposal.policy || proposal.policy.lead !== true) return false;
+          const approverIds = [...new Set(proposal.approvals.map((item) => item.reviewerId).filter((id) => reviewerById.has(id)))];
+          if (approverIds.length < proposal.policy.count) return false;
+          return !approverIds.some((id) => reviewerById.get(id)?.isLead);
+        })
+        .map((proposal) => ({
+          id: proposal.id,
+          reportId: proposal.reportId,
+          incidentId: proposal.incidentId ?? null,
+          level: proposal.level,
+          severity: proposal.severity,
+          title: proposal.title,
+          summary: proposal.summary,
+          createdAt: proposal.createdAt,
+          leadNotifiedAt: proposal.leadNotifiedAt ?? null,
+          approvals: [...new Set(proposal.approvals.map((item) => item.reviewerId).filter((id) => reviewerById.has(id)))].length,
+          requiredApprovals: proposal.policy.count,
+        })));
+    },
     // The trusted Discord bot confirms whether it actually notified the Lead. Ollie
     // 2026-10-03 17:48: only a confirmed notification starts the one-hour fallback clock;
     // a failed notification must not start it, so the timestamp stays unset.

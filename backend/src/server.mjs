@@ -146,6 +146,9 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
         if (segments[2] === 'incidents' && req.method === 'POST' && segments.length === 5 && segments[4] === 'publication') {
           return respond(res, 200, await mvp.proposeFromIncident(segments[3], reviewer.id, await readJson(req)));
         }
+        if (segments[2] === 'proposals' && segments[3] === 'pending' && req.method === 'GET' && segments.length === 4) {
+          return respond(res, 200, { proposals: mvp.listPendingLeadProposals(reviewer.id) });
+        }
         if (segments[2] === 'proposals') {
           if (req.method === 'GET' && segments.length === 4) return respond(res, 200, mvp.getProposal(segments[3], reviewer.id));
           if (req.method === 'POST' && segments.length === 5 && segments[4] === 'approval') {

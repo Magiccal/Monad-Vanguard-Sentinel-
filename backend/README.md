@@ -35,6 +35,7 @@ MVP endpoints:
 | `POST /v1/mvp/reports/:id/publication` | Propose first incident and cast the proposing reviewer's vote. |
 | `POST /v1/mvp/incidents/:id/publication` | Propose a new version of a published incident. |
 | `GET /v1/mvp/proposals/:id`, `POST /v1/mvp/proposals/:id/approval`, `/evaluate`, `/cancel` | Private proposal audit, authenticated reviewer vote, clock re-evaluation of a pending proposal, and Lead cancellation of a pending proposal. |
+| `GET /v1/mvp/proposals/pending` | Reviewer-only feed of pending proposals that have the required non-Lead votes and still wait on the Lead; the trusted Discord bot uses it to DM the Lead and then confirm the delivery attempt. |
 | `GET /v1/mvp/incidents`, `GET /v1/mvp/incidents/:id` | Reviewer-approved public incidents only. |
 | `GET /v1/mvp/notifications/outbox` | Reviewer-only unsent Discord draft events. |
 

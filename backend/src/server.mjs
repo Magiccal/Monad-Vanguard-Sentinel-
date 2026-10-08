@@ -129,6 +129,17 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
         const body = await readJson(req);
         return respond(res, 200, await mvp.recordLeadNotification(body));
       }
+      if (pathname === '/v1/discord/reviewer-alerts' && req.method === 'GET') {
+        if (!mvp || !discordBotToken) throw new DomainError(503, 'mvp_not_configured', 'Trusted Discord report adapter is not configured');
+        if (!authorized(req, discordBotToken)) throw new DomainError(401, 'unauthorized', 'Discord adapter bearer token required');
+        return respond(res, 200, { reports: mvp.listUnnotifiedReviewerReports() });
+      }
+      const reviewerNotificationMatch = pathname.match(/^\/v1\/discord\/reports\/(R-[0-9]{4,})\/reviewer-notification$/);
+      if (reviewerNotificationMatch && req.method === 'POST') {
+        if (!mvp || !discordBotToken) throw new DomainError(503, 'mvp_not_configured', 'Trusted Discord report adapter is not configured');
+        if (!authorized(req, discordBotToken)) throw new DomainError(401, 'unauthorized', 'Discord adapter bearer token required');
+        return respond(res, 200, await mvp.recordReviewerReportNotification(reviewerNotificationMatch[1]));
+      }
       if (segments[0] === 'v1' && segments[1] === 'mvp') {
         if (!mvp) throw new DomainError(503, 'mvp_not_configured', 'MVP workflow is not configured');
         if (segments[2] === 'incidents' && req.method === 'GET' && segments.length === 3) {
@@ -159,9 +170,13 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
           return respond(res, 200, { proposals: mvp.listPendingLeadProposals(reviewer.id) });
         }
         if (segments[2] === 'proposals') {
+          if (req.method === 'GET' && segments.length === 3) return respond(res, 200, { proposals: mvp.listProposals(reviewer.id) });
           if (req.method === 'GET' && segments.length === 4) return respond(res, 200, mvp.getProposal(segments[3], reviewer.id));
           if (req.method === 'POST' && segments.length === 5 && segments[4] === 'approval') {
             return respond(res, 200, await mvp.approveProposal(segments[3], reviewer.id));
+          }
+          if (req.method === 'POST' && segments.length === 5 && segments[4] === 'rejection') {
+            return respond(res, 200, await mvp.rejectProposal(segments[3], reviewer.id, await readJson(req)));
           }
           if (req.method === 'POST' && segments.length === 5 && segments[4] === 'evaluate') {
             return respond(res, 200, await mvp.evaluateProposal(segments[3], reviewer.id));

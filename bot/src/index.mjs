@@ -1,7 +1,8 @@
 // Sentinel Discord adapter (MVP). Responsibilities:
-//   1. Serve the four /sentinel subcommands (report / check / status / myreports).
+//   1. Serve public report/lookup commands and Reviewer-role-only review commands.
 //   2. Post newly published incidents (outbox drafts) to the public #sentinel-alerts channel.
-//   3. DM the Lead when a proposal is waiting on their approval and confirm the delivery
+//   3. Post report-number-only notices to the private reviewer channel.
+//   4. DM the Lead when a proposal is waiting on their approval and confirm the delivery
 //      attempt via POST /v1/discord/lead-notifications (delivered true ONLY after the DM
 //      was actually sent; a failed DM confirms delivered:false so the fallback clock never
 //      starts on a failed notification — Ollie, 2026-10-03).
@@ -34,7 +35,10 @@ if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) {
 const { Client, Events, GatewayIntentBits, MessageFlags } = await import('discord.js');
 import { config } from './config.mjs';
 import { backend } from './backend.mjs';
-const { formatIncidentLine, formatReportRows, formatReportSubmitted, incidentEmbed } = await import('./commands.mjs');
+const {
+  formatIncidentLine, formatPrivateReport, formatReportRows, formatReportSubmitted,
+  formatReviewerQueue, incidentEmbed,
+} = await import('./commands.mjs');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -42,12 +46,15 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 // backend feeds, so at most one duplicate alert post or Lead DM can happen after a restart.
 const postedIncidentVersions = new Set();
 const leadNotifiedProposals = new Set();
+const reviewerNoticeInFlight = new Set();
 
 client.once(Events.ClientReady, (ready) => {
   console.log(`[sentinel-bot] logged in as ${ready.user.tag}`);
   setInterval(() => void runSafely('alerts', deliverAlerts), config.pollIntervalMs);
+  setInterval(() => void runSafely('reviewer-notices', notifyReviewers), config.pollIntervalMs);
   setInterval(() => void runSafely('lead', notifyLead), config.pollIntervalMs);
   void runSafely('alerts', deliverAlerts);
+  void runSafely('reviewer-notices', notifyReviewers);
   void runSafely('lead', notifyLead);
 });
 
@@ -66,6 +73,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
 async function handleSentinel(interaction) {
   const subcommand = interaction.options.getSubcommand();
   const reporterId = interaction.user.id;
+  if (['queue', 'open', 'propose', 'approve', 'reject'].includes(subcommand)) {
+    const reviewer = reviewerIdentity(interaction);
+    if (!reviewer) {
+      await interaction.reply({
+        content: 'This command is limited to configured reviewers with the Reviewer role.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    await handleReviewerCommand(interaction, subcommand, reviewer);
+    return;
+  }
   switch (subcommand) {
     case 'report': {
       const body = { description: interaction.options.getString('description', true) };
@@ -124,6 +143,116 @@ async function handleSentinel(interaction) {
       return;
     }
     default:
+  }
+}
+
+function reviewerIdentity(interaction) {
+  if (!interaction.guildId || !config.reviewerRoleId) return null;
+  const roles = interaction.member?.roles;
+  const hasRole = Array.isArray(roles)
+    ? roles.includes(config.reviewerRoleId)
+    : Boolean(roles?.cache?.has(config.reviewerRoleId));
+  if (!hasRole) return null;
+  return config.reviewerIdentities.find((item) => item.discordId === interaction.user.id) ?? null;
+}
+
+async function handleReviewerCommand(interaction, subcommand, reviewer) {
+  if (subcommand === 'queue') {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const [{ reports }, { proposals }] = await Promise.all([
+      backend.listReviewReports(reviewer.token),
+      backend.listReviewProposals(reviewer.token),
+    ]);
+    await interaction.editReply({
+      content: formatReviewerQueue(reports, proposals),
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (subcommand === 'open') {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const reportId = interaction.options.getString('report_id', true).toUpperCase();
+    const report = await backend.getReviewReport(reportId, reviewer.token);
+    await interaction.editReply({ content: formatPrivateReport(report), allowedMentions: { parse: [] } });
+    return;
+  }
+
+  if (subcommand === 'propose') {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const reportId = interaction.options.getString('report_id', true).toUpperCase();
+    const level = interaction.options.getString('level', true);
+    const severityValue = interaction.options.getString('severity', true);
+    const evidenceIds = interaction.options.getString('public_evidence_ids')
+      ?.split(',').map((id) => id.trim()).filter(Boolean) ?? [];
+    const advice = [1, 2, 3]
+      .map((number) => interaction.options.getString(`advice_${number}`)?.trim())
+      .filter(Boolean);
+    const result = await backend.proposeFromReport(reportId, reviewer.token, {
+      level,
+      severity: severityValue === 'none' ? null : severityValue,
+      title: interaction.options.getString('title', true),
+      summary: interaction.options.getString('summary', true),
+      verificationNote: interaction.options.getString('verification_note', true),
+      advice,
+      publicEvidenceIds: evidenceIds,
+      reason: interaction.options.getString('reason', true),
+    });
+    await interaction.editReply({
+      content: `Proposal **${result.id}** for ${result.reportId}: **${result.status}** · approvals ${result.approvals.length}/${result.requiredApprovals}.`,
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (subcommand === 'approve') {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const proposalId = interaction.options.getString('proposal_id', true);
+    const result = await backend.approveProposal(proposalId, reviewer.token);
+    const published = result.publishedIncident ? ` Published as **${result.publishedIncident.id}**.` : '';
+    await interaction.editReply({
+      content: `Proposal **${result.id}**: **${result.status}** · approvals ${result.approvals.length}/${result.requiredApprovals}.${published}`,
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (subcommand === 'reject') {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const proposalId = interaction.options.getString('proposal_id', true);
+    const reason = interaction.options.getString('reason', true);
+    const result = await backend.rejectProposal(proposalId, reviewer.token, reason);
+    await interaction.editReply({
+      content: `Proposal **${result.id}**: **${result.status}**. The source report remains private and may be proposed again after revision.`,
+      allowedMentions: { parse: [] },
+    });
+  }
+}
+
+function reviewerNoticeChannel() {
+  if (!config.reviewerChannelId) return null;
+  return client.channels.fetch(config.reviewerChannelId);
+}
+
+// A durable backend marker makes notification delivery idempotent across bot restarts.
+// The feed includes report IDs only; report text, reporter identity, and raw links stay private.
+async function notifyReviewers() {
+  if (!config.reviewerChannelId) return;
+  const { reports } = await backend.unnotifiedReviewerReports();
+  for (const report of reports) {
+    if (reviewerNoticeInFlight.has(report.id)) continue;
+    reviewerNoticeInFlight.add(report.id);
+    try {
+      const channel = await reviewerNoticeChannel();
+      if (!channel?.isTextBased()) throw new Error('Configured reviewer channel is not text-based');
+      await channel.send({
+        content: `🆕 New private report: **${report.id}**. Use `/sentinel open report_id:${report.id}` to review it.`,
+        allowedMentions: { parse: [] },
+      });
+      await backend.confirmReviewerReportNotification(report.id);
+    } finally {
+      reviewerNoticeInFlight.delete(report.id);
+    }
   }
 }
 

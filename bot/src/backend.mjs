@@ -39,6 +39,12 @@ export const backend = {
   reportStatus(discordUserId) {
     return call('/v1/discord/reports/status', { method: 'POST', token: config.botBackendToken, body: { discordUserId } });
   },
+  unnotifiedReviewerReports() {
+    return call('/v1/discord/reviewer-alerts', { token: config.botBackendToken });
+  },
+  confirmReviewerReportNotification(reportId) {
+    return call(`/v1/discord/reports/${encodeURIComponent(reportId)}/reviewer-notification`, { method: 'POST', token: config.botBackendToken });
+  },
 
   // Public, reviewer-approved incidents (also served to the no-login web page).
   listIncidents() {
@@ -51,6 +57,24 @@ export const backend = {
   },
   pendingLeadProposals() {
     return call('/v1/mvp/proposals/pending', { token: config.reviewerToken });
+  },
+  listReviewReports(token = config.reviewerToken) {
+    return call('/v1/mvp/reports', { token });
+  },
+  listReviewProposals(token) {
+    return call('/v1/mvp/proposals', { token });
+  },
+  getReviewReport(reportId, token) {
+    return call(`/v1/mvp/reports/${encodeURIComponent(reportId)}`, { token });
+  },
+  proposeFromReport(reportId, token, body) {
+    return call(`/v1/mvp/reports/${encodeURIComponent(reportId)}/publication`, { method: 'POST', token, body });
+  },
+  approveProposal(proposalId, token) {
+    return call(`/v1/mvp/proposals/${encodeURIComponent(proposalId)}/approval`, { method: 'POST', token });
+  },
+  rejectProposal(proposalId, token, reason) {
+    return call(`/v1/mvp/proposals/${encodeURIComponent(proposalId)}/rejection`, { method: 'POST', token, body: { reason } });
   },
 
   // The one-hour Lead fallback clock starts only on a confirmed delivery.

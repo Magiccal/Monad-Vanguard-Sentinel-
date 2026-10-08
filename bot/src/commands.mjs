@@ -1,10 +1,21 @@
 // Slash command definition for /sentinel and the shared formatting helpers.
-// The four commands match the team plan (Ollie, 2026-10-06):
-//   /sentinel report    - submit a private report (stays private until a reviewer opens it)
-//   /sentinel check     - look up a published incident by SEN-#### (or list the latest)
-//   /sentinel status    - minimal status of one of your own reports (R-####)
-//   /sentinel myreports - minimal status of all your own reports
+// Public/reporting commands are available to everyone. Reviewer commands are
+// additionally guarded at runtime by Reviewer role membership and a Discord-ID/token map.
 import { EmbedBuilder } from 'discord.js';
+
+const LEVEL_CHOICES = [
+  { name: 'Informational', value: 'informational' },
+  { name: 'Under investigation', value: 'under_investigation' },
+  { name: 'Credible threat', value: 'credible_threat' },
+  { name: 'Confirmed incident', value: 'confirmed_incident' },
+];
+const SEVERITY_CHOICES = [
+  { name: 'None (informational only)', value: 'none' },
+  { name: 'Critical', value: 'critical' },
+  { name: 'High', value: 'high' },
+  { name: 'Medium', value: 'medium' },
+  { name: 'Low', value: 'low' },
+];
 
 export const INCIDENT_TYPE_CHOICES = [
   { name: 'Exploit / hack', value: 'exploit_hack' },
@@ -54,6 +65,55 @@ export const sentinelCommand = {
       description: 'List the minimal status of all reports you submitted',
       options: [],
     },
+    {
+      type: 1,
+      name: 'queue',
+      description: 'List open private reports (Reviewer role required)',
+      options: [],
+    },
+    {
+      type: 1,
+      name: 'open',
+      description: 'Privately open a report (Reviewer role required)',
+      options: [
+        { type: 3, name: 'report_id', description: 'Private report ID, e.g. R-0001', required: true, max_length: 32 },
+      ],
+    },
+    {
+      type: 1,
+      name: 'propose',
+      description: 'Propose a public incident from a private report',
+      options: [
+        { type: 3, name: 'report_id', description: 'Private report ID, e.g. R-0001', required: true, max_length: 32 },
+        { type: 3, name: 'level', description: 'Proposed public level', required: true, choices: LEVEL_CHOICES },
+        { type: 3, name: 'severity', description: 'Severity, or none for informational', required: true, choices: SEVERITY_CHOICES },
+        { type: 3, name: 'title', description: 'Reviewer-written public title', required: true, max_length: 160 },
+        { type: 3, name: 'summary', description: 'Reviewer-written public summary', required: true, max_length: 2000 },
+        { type: 3, name: 'verification_note', description: 'What evidence supports this level?', required: true, max_length: 500 },
+        { type: 3, name: 'advice_1', description: 'First action bullet', required: true, max_length: 300 },
+        { type: 3, name: 'reason', description: 'Private reason for this proposal', required: true, max_length: 1000 },
+        { type: 3, name: 'public_evidence_ids', description: 'Comma-separated evidence UUIDs to publish', required: false, max_length: 500 },
+        { type: 3, name: 'advice_2', description: 'Second action bullet (optional)', required: false, max_length: 300 },
+        { type: 3, name: 'advice_3', description: 'Third action bullet (optional)', required: false, max_length: 300 },
+      ],
+    },
+    {
+      type: 1,
+      name: 'approve',
+      description: 'Approve a pending publication proposal',
+      options: [
+        { type: 3, name: 'proposal_id', description: 'Proposal UUID', required: true, max_length: 64 },
+      ],
+    },
+    {
+      type: 1,
+      name: 'reject',
+      description: 'Reject a pending publication proposal with an audit reason',
+      options: [
+        { type: 3, name: 'proposal_id', description: 'Proposal UUID', required: true, max_length: 64 },
+        { type: 3, name: 'reason', description: 'Why this proposal is rejected', required: true, min_length: 20, max_length: 1000 },
+      ],
+    },
   ],
 };
 
@@ -72,6 +132,35 @@ export function formatReportRows(reports) {
     const linked = report.mergedInto ? ` (merged into ${report.mergedInto})` : report.incidentId ? ` (published as ${report.incidentId})` : '';
     return `**${report.id}** — ${report.status}${linked} (updated ${report.updatedAt})`;
   }).join('\n');
+}
+
+export function formatReviewerQueue(reports, proposals = []) {
+  const open = reports.filter((report) => ['submitted', 'triaged'].includes(report.status) && !report.incidentId);
+  const pending = proposals.filter((proposal) => proposal.status === 'pending');
+  if (!open.length && !pending.length) return 'No open reports or pending proposals in the reviewer queue.';
+  const reportLines = open.slice(0, 12).map((report) => `Report **${report.id}** — ${report.status} (updated ${report.updatedAt})`);
+  const proposalLines = pending.slice(0, 8).map((proposal) =>
+    `Proposal **${proposal.id}** for ${proposal.reportId} — ${proposal.level}/${proposal.severity ?? 'none'} · approvals ${proposal.approvals}/${proposal.requiredApprovals}`);
+  return [...reportLines, ...proposalLines].join('\n').slice(0, 1850);
+}
+
+export function formatPrivateReport(report) {
+  const lines = [
+    `Report **${report.id}** · ${report.status}`,
+    `Project: ${report.projectId || 'Not specified'} · Type: ${report.incidentType}`,
+    `Submitted: ${report.createdAt}`,
+    '',
+    'Description:',
+    report.description,
+    '',
+    'Targets:',
+    ...(report.targets?.length ? report.targets.map((item) => `• ${item.kind}: ${item.value}`) : ['• None']),
+    '',
+    'Evidence (select UUIDs with /sentinel propose only when safe to publish):',
+    ...(report.evidence?.length ? report.evidence.map((item) => `• ${item.id} · ${item.kind}: ${item.reference}${item.note ? ` — ${item.note}` : ''}`) : ['• None']),
+  ];
+  const value = lines.join('\n');
+  return value.length <= 1850 ? value : `${value.slice(0, 1840)}\n…[truncated; use the reviewer API for full details]`;
 }
 
 const LEVEL_COLORS = {

@@ -71,9 +71,9 @@ async function handleSentinel(interaction) {
       const body = { description: interaction.options.getString('description', true) };
       const project = interaction.options.getString('project');
       const type = interaction.options.getString('type');
-      const targetUrl = interaction.options.getString('target_url');
+      const targetUrl = normalizeSubmittedUrl(interaction.options.getString('target_url'));
       const targetAddress = interaction.options.getString('target_address');
-      const evidenceUrl = interaction.options.getString('evidence_url');
+      const evidenceUrl = normalizeSubmittedUrl(interaction.options.getString('evidence_url'));
       if (project) body.projectId = project;
       if (type) body.incidentType = type;
       const targets = [];
@@ -175,6 +175,15 @@ async function runSafely(loop, fn) {
   } catch (error) {
     console.error(`[sentinel-bot] ${loop} loop failed:`, error.message);
   }
+}
+
+// Reporters often type bare domains ("mist-claim.xyz"); the backend requires an
+// explicit HTTP(S) URL. Prefix https:// when no protocol was given, otherwise pass
+// the value through unchanged (backend still validates and rejects other junk).
+function normalizeSubmittedUrl(value) {
+  if (!value) return value;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return value;
+  return `https://${value}`;
 }
 
 client.login(config.discordToken);

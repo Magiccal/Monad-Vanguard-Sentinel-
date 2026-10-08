@@ -31,6 +31,7 @@ async function request(path, { method = 'GET', body, reviewer = false } = {}) {
     const token = byId('reviewer-token').value.trim();
     if (!token) throw new Error('请先填写审核令牌');
     headers.authorization = `Bearer ${token}`;
+    headers['x-sentinel-token'] = token;
   }
   const response = await fetch(path, {
     method, headers,

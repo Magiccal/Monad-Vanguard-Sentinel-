@@ -43,11 +43,20 @@ async function respondStatic(res, pathname, mvpPage = false) {
 }
 
 function authorized(req, token) {
+  // Accept the standard Authorization bearer header and the x-sentinel-token
+  // fallback header, trying BOTH values. The fallback keeps authenticated
+  // calls working behind reverse proxies that rewrite the Authorization
+  // header value (observed on the hosted demo sandbox on 2026-10-08).
+  const candidates = [];
   const supplied = req.headers.authorization;
-  if (typeof supplied !== 'string' || !supplied.startsWith('Bearer ')) return false;
-  const actual = Buffer.from(supplied.slice(7));
+  if (typeof supplied === 'string' && supplied.startsWith('Bearer ')) candidates.push(supplied.slice(7));
+  const fallback = req.headers['x-sentinel-token'];
+  if (typeof fallback === 'string') candidates.push(fallback);
   const expected = Buffer.from(token);
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
+  return candidates.some((value) => {
+    const actual = Buffer.from(value);
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  });
 }
 
 async function readJson(req) {

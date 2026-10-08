@@ -183,8 +183,8 @@ async function handleReviewerCommand(interaction, subcommand, reviewer) {
     const reportId = interaction.options.getString('report_id', true).toUpperCase();
     const level = interaction.options.getString('level', true);
     const severityValue = interaction.options.getString('severity', true);
-    const evidenceIds = interaction.options.getString('public_evidence_ids')
-      ?.split(',').map((id) => id.trim()).filter(Boolean) ?? [];
+    const report = await backend.getReviewReport(reportId, reviewer.token);
+    const evidenceIds = parsePublicEvidenceNumbers(report, interaction.options.getString('public_evidence_numbers'));
     const advice = [1, 2, 3]
       .map((number) => interaction.options.getString(`advice_${number}`)?.trim())
       .filter(Boolean);
@@ -207,7 +207,11 @@ async function handleReviewerCommand(interaction, subcommand, reviewer) {
 
   if (subcommand === 'approve') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const proposalId = interaction.options.getString('proposal_id', true);
+    const proposalId = await resolveProposalId(interaction.options.getString('proposal_id', true), reviewer.token);
+    if (!proposalId) {
+      await interaction.editReply({ content: 'No pending proposal found for that report number.', allowedMentions: { parse: [] } });
+      return;
+    }
     const result = await backend.approveProposal(proposalId, reviewer.token);
     const published = result.publishedIncident ? ` Published as **${result.publishedIncident.id}**.` : '';
     await interaction.editReply({
@@ -219,7 +223,11 @@ async function handleReviewerCommand(interaction, subcommand, reviewer) {
 
   if (subcommand === 'reject') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const proposalId = interaction.options.getString('proposal_id', true);
+    const proposalId = await resolveProposalId(interaction.options.getString('proposal_id', true), reviewer.token);
+    if (!proposalId) {
+      await interaction.editReply({ content: 'No pending proposal found for that report number.', allowedMentions: { parse: [] } });
+      return;
+    }
     const reason = interaction.options.getString('reason', true);
     const result = await backend.rejectProposal(proposalId, reviewer.token, reason);
     await interaction.editReply({
@@ -227,6 +235,28 @@ async function handleReviewerCommand(interaction, subcommand, reviewer) {
       allowedMentions: { parse: [] },
     });
   }
+}
+
+async function resolveProposalId(value, token) {
+  const identifier = value.trim();
+  if (!/^R-\d{4,}$/i.test(identifier)) return identifier;
+  const { proposals } = await backend.listReviewProposals(token);
+  const matches = proposals.filter((proposal) => proposal.reportId.toUpperCase() === identifier.toUpperCase());
+  if (matches.length !== 1) return null;
+  return matches[0].id;
+}
+
+function parsePublicEvidenceNumbers(report, value) {
+  if (!value?.trim()) return [];
+  const numbers = value.split(',').map((part) => part.trim());
+  if (numbers.some((part) => !/^\d+$/.test(part))) {
+    throw new Error('Use comma-separated evidence numbers from /sentinel open, such as 1,2.');
+  }
+  const indexes = numbers.map(Number);
+  if (new Set(indexes).size !== indexes.length || indexes.some((number) => number < 1 || number > (report.evidence?.length ?? 0))) {
+    throw new Error('Evidence number is duplicated or not listed in this report. Run /sentinel open to see the available numbers.');
+  }
+  return indexes.map((number) => report.evidence[number - 1].id);
 }
 
 function reviewerNoticeChannel() {
@@ -246,7 +276,7 @@ async function notifyReviewers() {
       const channel = await reviewerNoticeChannel();
       if (!channel?.isTextBased()) throw new Error('Configured reviewer channel is not text-based');
       await channel.send({
-        content: `🆕 New private report: **${report.id}**. Use `/sentinel open report_id:${report.id}` to review it.`,
+        content: `🆕 New private report: **${report.id}**. Use /sentinel open with report_id ${report.id} to review it.`,
         allowedMentions: { parse: [] },
       });
       await backend.confirmReviewerReportNotification(report.id);

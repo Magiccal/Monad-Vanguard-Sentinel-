@@ -32,10 +32,12 @@ test('MVP OpenAPI is separate from the disabled legacy contract and all referenc
   assert.equal(specification.openapi, '3.1.0');
   for (const route of [
     '/v1/discord/reports', '/v1/discord/reports/status', '/v1/discord/lead-notifications',
+    '/v1/discord/reviewer-alerts', '/v1/discord/reports/{id}/reviewer-notification',
     '/v1/mvp/reports', '/v1/mvp/reports/{id}', '/v1/mvp/reports/{id}/triage', '/v1/mvp/reports/{id}/merge',
     '/v1/mvp/reports/{id}/publication', '/v1/mvp/incidents', '/v1/mvp/incidents/{id}',
-    '/v1/mvp/incidents/{id}/publication', '/v1/mvp/proposals/{id}',
-    '/v1/mvp/proposals/{id}/approval', '/v1/mvp/proposals/{id}/evaluate', '/v1/mvp/proposals/{id}/cancel',
+    '/v1/mvp/incidents/{id}/publication', '/v1/mvp/proposals', '/v1/mvp/proposals/{id}',
+    '/v1/mvp/proposals/{id}/approval', '/v1/mvp/proposals/{id}/rejection',
+    '/v1/mvp/proposals/{id}/evaluate', '/v1/mvp/proposals/{id}/cancel',
     '/v1/mvp/notifications/outbox',
   ]) assert.ok(specification.paths[route], route);
   assert.equal(specification.paths['/v1/reports'], undefined);

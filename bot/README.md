@@ -36,9 +36,12 @@ verify Discord interaction signatures itself.
 8. **Reviewer commands** — `/sentinel queue`, `open`, `propose`, `approve`, and `reject`
    require both the configured Discord Reviewer role and a server-side mapping from the
    caller's Discord ID to that reviewer's own backend token. Replies are ephemeral. `open`
-   shows private report details only to the invoking reviewer. `reject` ends a pending
-   proposal with an audit reason while leaving the source report private and available for
-   a revised proposal.
+   shows private report details only to the invoking reviewer, with evidence numbered for
+   easy selection. `propose` accepts those short evidence numbers and maps them to the
+   report's evidence IDs. `approve` and `reject` accept either a proposal UUID or its source
+   report ID (`R-####`), so reviewers can act directly from a private-channel report notice.
+   `reject` ends a pending proposal with an audit reason while leaving the source report
+   private and available for a revised proposal.
 
 ## One-time setup (Discord Developer Portal)
 
@@ -104,8 +107,10 @@ either run it on a host with direct Discord reachability or set `HTTPS_PROXY` wi
 undici global dispatcher (the runtime code currently assumes direct connectivity; wire
 the same ProxyAgent into `index.mjs` when deploying behind a proxy).
 
-Verified setup (2026-10-06): application ID `1557042036106854510`, global `/sentinel`
-command registered with the four subcommands `report`, `check`, `status`, `myreports`.
+Reviewer review workflow (2026-10-08): `/sentinel approve` and `/sentinel reject` accept
+either a proposal UUID or source report ID. `/sentinel open` numbers private evidence in
+its ephemeral response, and `/sentinel propose` accepts those numbers instead of requiring
+reviewers to type evidence UUIDs.
 
 ## Notes and limits
 

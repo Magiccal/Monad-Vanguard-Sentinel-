@@ -92,7 +92,7 @@ export const sentinelCommand = {
         { type: 3, name: 'verification_note', description: 'What evidence supports this level?', required: true, max_length: 500 },
         { type: 3, name: 'advice_1', description: 'First action bullet', required: true, max_length: 300 },
         { type: 3, name: 'reason', description: 'Private reason for this proposal', required: true, max_length: 1000 },
-        { type: 3, name: 'public_evidence_ids', description: 'Comma-separated evidence UUIDs to publish', required: false, max_length: 500 },
+        { type: 3, name: 'public_evidence_numbers', description: 'Comma-separated evidence numbers from /sentinel open', required: false, max_length: 100 },
         { type: 3, name: 'advice_2', description: 'Second action bullet (optional)', required: false, max_length: 300 },
         { type: 3, name: 'advice_3', description: 'Third action bullet (optional)', required: false, max_length: 300 },
       ],
@@ -100,17 +100,17 @@ export const sentinelCommand = {
     {
       type: 1,
       name: 'approve',
-      description: 'Approve a pending publication proposal',
+      description: 'Approve using a proposal UUID or source report number',
       options: [
-        { type: 3, name: 'proposal_id', description: 'Proposal UUID', required: true, max_length: 64 },
+        { type: 3, name: 'proposal_id', description: 'Proposal UUID or report ID, e.g. R-0001', required: true, max_length: 64 },
       ],
     },
     {
       type: 1,
       name: 'reject',
-      description: 'Reject a pending publication proposal with an audit reason',
+      description: 'Reject using a proposal UUID or source report number',
       options: [
-        { type: 3, name: 'proposal_id', description: 'Proposal UUID', required: true, max_length: 64 },
+        { type: 3, name: 'proposal_id', description: 'Proposal UUID or report ID, e.g. R-0001', required: true, max_length: 64 },
         { type: 3, name: 'reason', description: 'Why this proposal is rejected', required: true, min_length: 20, max_length: 1000 },
       ],
     },
@@ -156,8 +156,8 @@ export function formatPrivateReport(report) {
     'Targets:',
     ...(report.targets?.length ? report.targets.map((item) => `• ${item.kind}: ${item.value}`) : ['• None']),
     '',
-    'Evidence (select UUIDs with /sentinel propose only when safe to publish):',
-    ...(report.evidence?.length ? report.evidence.map((item) => `• ${item.id} · ${item.kind}: ${item.reference}${item.note ? ` — ${item.note}` : ''}`) : ['• None']),
+    'Evidence (use the short number with /sentinel propose only when safe to publish):',
+    ...(report.evidence?.length ? report.evidence.map((item, index) => `• ${index + 1}. ${item.kind}: ${item.reference}${item.note ? ` — ${item.note}` : ''}`) : ['• None']),
   ];
   const value = lines.join('\n');
   return value.length <= 1850 ? value : `${value.slice(0, 1840)}\n…[truncated; use the reviewer API for full details]`;

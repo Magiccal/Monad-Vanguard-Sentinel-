@@ -109,6 +109,68 @@ test('trusted Discord submissions require only description and stay private befo
   assert.deepEqual((await invoke(server, 'GET', '/v1/mvp/notifications/outbox', undefined, reviewers[0].token)).body.events, []);
 });
 
+test('reviewer alert feed reveals only report IDs and records delivery once', async () => {
+  const store = await Store.open();
+  const mvp = createMvpService(store, { reviewers });
+  const server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers, discordBotToken: botToken });
+  const report = await mvp.submitDiscord({
+    description: 'PRIVATE reviewer notification test report.',
+    evidence: [{ kind: 'link', reference: 'https://private.example.test/evidence', note: 'PRIVATE evidence note' }],
+  }, reporterDiscordId);
+
+  assert.equal((await invoke(server, 'GET', '/v1/discord/reviewer-alerts')).status, 401);
+  const feed = await invoke(server, 'GET', '/v1/discord/reviewer-alerts', undefined, botToken);
+  assert.equal(feed.status, 200);
+  assert.deepEqual(feed.body.reports, [{ id: report.id, createdAt: report.createdAt }]);
+  assert.equal(JSON.stringify(feed.body).includes('PRIVATE'), false);
+  assert.equal(JSON.stringify(feed.body).includes(reporterDiscordId), false);
+
+  assert.equal((await invoke(server, 'POST', `/v1/discord/reports/${report.id}/reviewer-notification`)).status, 401);
+  const marked = await invoke(server, 'POST', `/v1/discord/reports/${report.id}/reviewer-notification`, undefined, botToken);
+  assert.equal(marked.status, 200);
+  assert.ok(marked.body.reviewerNotifiedAt);
+  assert.deepEqual((await invoke(server, 'GET', '/v1/discord/reviewer-alerts', undefined, botToken)).body.reports, []);
+});
+
+test('reviewer proposal list and rejection endpoints enforce auth and retain the private source report', async () => {
+  const store = await Store.open();
+  const mvp = createMvpService(store, { reviewers });
+  const server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers, discordBotToken: botToken });
+  const report = await mvp.submitDiscord({ description: 'A fictional proposal for reviewer endpoint coverage.', evidence: [transactionEvidence] }, reporterDiscordId);
+  const evidenceId = mvp.getReport(report.id, reviewers[0].id).evidence[0].id;
+  const proposal = await invoke(server, 'POST', `/v1/mvp/reports/${report.id}/publication`, {
+    ...publicNarrative,
+    level: 'credible_threat', severity: 'medium', title: 'Fictional endpoint test warning',
+    advice: ['Pause interactions with the fictional service while reviewers check the evidence.'],
+    reason: 'This proposal exists only to exercise reviewer endpoints safely.',
+    publicEvidenceIds: [evidenceId],
+  }, reviewers[0].token);
+  assert.equal(proposal.status, 200);
+  assert.equal(proposal.body.status, 'pending');
+
+  assert.equal((await invoke(server, 'GET', '/v1/mvp/proposals')).status, 401);
+  const listed = await invoke(server, 'GET', '/v1/mvp/proposals', undefined, reviewers[1].token);
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.body.proposals, [{
+    id: proposal.body.id, reportId: report.id, status: 'pending', level: 'credible_threat', severity: 'medium',
+    title: 'Fictional endpoint test warning', approvals: 1, rejections: 0, requiredApprovals: 2,
+  }]);
+  const reason = 'Reviewers need more evidence before publishing this claim.';
+  assert.equal((await invoke(server, 'POST', `/v1/mvp/proposals/${proposal.body.id}/rejection`, { reason })).status, 401);
+  const rejected = await invoke(server, 'POST', `/v1/mvp/proposals/${proposal.body.id}/rejection`, { reason }, reviewers[1].token);
+  assert.equal(rejected.status, 200);
+  assert.equal(rejected.body.status, 'rejected');
+  assert.deepEqual(rejected.body.rejections.map((item) => ({ reviewerId: item.reviewerId, reason: item.reason })), [
+    { reviewerId: reviewers[1].id, reason },
+  ]);
+  assert.deepEqual((await invoke(server, 'GET', '/v1/mvp/proposals', undefined, reviewers[1].token)).body.proposals, []);
+  assert.equal((await invoke(server, 'GET', '/v1/mvp/incidents')).body.incidents.length, 0);
+  const privateReport = await invoke(server, 'GET', `/v1/mvp/reports/${report.id}`, undefined, reviewers[1].token);
+  assert.equal(privateReport.status, 200);
+  assert.equal(privateReport.body.status, 'submitted');
+  assert.equal(privateReport.body.description, 'A fictional proposal for reviewer endpoint coverage.');
+});
+
 test('two independent reviewers publish credible threats; duplicate and self approvals fail', async () => {
   const store = await Store.open();
   const mvp = createMvpService(store, { reviewers });

@@ -16,7 +16,7 @@ async function call(path, { method = 'GET', token, body } = {}) {
   const response = await doFetch(`${config.backendBaseUrl}${path}`, {
     method,
     headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(token ? { Authorization: `Bearer ${token}`, 'x-sentinel-token': token } : {}),
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
     },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),

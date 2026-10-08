@@ -29,6 +29,19 @@ verify Discord interaction signatures itself.
    `POST /v1/discord/lead-notifications` with `delivered: true` only after the DM was
    actually sent. A failed DM confirms `delivered: false`, which never starts the one-hour
    fallback clock (Ollie, 2026-10-03).
+7. **Reviewer report notices** — polls a trusted-bot feed containing only new report IDs
+   and posts each ID once to the configured private `#reviewers` channel. It never posts
+   the reporter identity, description, target, or raw evidence URL. Delivery is marked in
+   the backend after Discord accepts the message, so a bot restart does not repost notices.
+8. **Reviewer commands** — `/sentinel queue`, `open`, `propose`, `approve`, and `reject`
+   require both the configured Discord Reviewer role and a server-side mapping from the
+   caller's Discord ID to that reviewer's own backend token. Replies are ephemeral. `open`
+   shows private report details only to the invoking reviewer, with evidence numbered for
+   easy selection. `propose` accepts those short evidence numbers and maps them to the
+   report's evidence IDs. `approve` and `reject` accept either a proposal UUID or its source
+   report ID (`R-####`), so reviewers can act directly from a private-channel report notice.
+   `reject` ends a pending proposal with an audit reason while leaving the source report
+   private and available for a revised proposal.
 
 ## One-time setup (Discord Developer Portal)
 
@@ -51,11 +64,29 @@ verify Discord interaction signatures itself.
 | `DISCORD_BOT_TOKEN` | Bot token from the Developer Portal (required) |
 | `DISCORD_CLIENT_ID` | Application ID, used for slash-command registration (required) |
 | `REVIEWER_TOKEN` | One configured backend reviewer token, used only to poll the outbox and pending-Lead feeds (required) |
+| `REVIEWER_IDENTITIES_JSON` | Secret JSON array of `{ "discordId", "reviewerId", "token" }` records; values must match the backend's reviewer roster and each reviewer gets their own token |
+| `REVIEWER_ROLE_ID` | Discord role ID required for all review commands |
+| `REVIEWER_CHANNEL_ID` | ID of the private `#reviewers` channel for report-number-only notices |
 | `ALERT_CHANNEL_ID` | Discord channel ID of the public `#sentinel-alerts` channel (required) |
 | `LEAD_DISCORD_ID` | Discord user ID of the Lead, for approval DMs (required) |
 | `BACKEND_BASE_URL` | MVP backend base URL (default `http://127.0.0.1:8787`) |
 | `BOT_BACKEND_TOKEN` | Overrides the bearer used against the backend (default: the Discord bot token) |
 | `POLL_INTERVAL_MS` | Polling interval for both delivery loops (default `30000`) |
+
+Example reviewer identity map (replace every placeholder using server-side secret settings;
+never paste tokens into Discord or commit them):
+
+```json
+[
+  { "discordId": "111111111111111111", "reviewerId": "reviewer-a", "token": "<reviewer-a-token>" },
+  { "discordId": "222222222222222222", "reviewerId": "reviewer-b", "token": "<reviewer-b-token>" },
+  { "discordId": "333333333333333333", "reviewerId": "lead", "token": "<lead-token>" }
+]
+```
+
+Register the updated global commands with `npm run register`, then restart the bot with
+`REVIEWER_ROLE_ID`, `REVIEWER_CHANNEL_ID`, and `REVIEWER_IDENTITIES_JSON` set. Confirm
+the configured reviewer channel is private before starting the report-notice loop.
 
 Start the backend in MVP mode with the **same** `DISCORD_BOT_TOKEN` value so the trusted
 adapter bearer check passes (see `../backend/README.md`), then:
@@ -76,8 +107,10 @@ either run it on a host with direct Discord reachability or set `HTTPS_PROXY` wi
 undici global dispatcher (the runtime code currently assumes direct connectivity; wire
 the same ProxyAgent into `index.mjs` when deploying behind a proxy).
 
-Verified setup (2026-10-06): application ID `1557042036106854510`, global `/sentinel`
-command registered with the four subcommands `report`, `check`, `status`, `myreports`.
+Reviewer review workflow (2026-10-08): `/sentinel approve` and `/sentinel reject` accept
+either a proposal UUID or source report ID. `/sentinel open` numbers private evidence in
+its ephemeral response, and `/sentinel propose` accepts those numbers instead of requiring
+reviewers to type evidence UUIDs.
 
 ## Notes and limits
 

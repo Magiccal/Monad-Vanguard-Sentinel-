@@ -208,7 +208,7 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
   }
   function proposalResult(proposal, incident = null) {
     return { id: proposal.id, reportId: proposal.reportId, incidentId: proposal.incidentId, status: proposal.status,
-      level: proposal.level, severity: proposal.severity, approvals: proposal.approvals,
+      level: proposal.level, severity: proposal.severity, approvals: proposal.approvals, rejections: proposal.rejections ?? [],
       requiredApprovals: demo ? 1 : proposal.policy.count,
       leadRequired: !demo && proposal.policy.lead,
       leadNotifiedAt: proposal.leadNotifiedAt ?? null,
@@ -264,7 +264,7 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
       reason: text(data.reason, 'reason', 20, 1000),
       publicEvidence,
       status: 'pending', createdAt: at, policy: policy(data.level, severity, incident), rosterFingerprint,
-      approvals: [{ reviewerId: reviewer.id, at }],
+      approvals: [{ reviewerId: reviewer.id, at }], rejections: [],
     };
     mvp.proposals.push(proposal);
     report.history.push({ type: 'publication_proposed', actor: reviewer.id, at, proposalId: proposal.id });
@@ -291,7 +291,7 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
           id: `R-${String(mvp.nextReportNumber++).padStart(4, '0')}`,
           reporterDiscordId: discordUserId, description, projectId, incidentType,
           targets, evidence: evidenceItems, status: 'submitted', incidentId: null,
-          mergedInto: null, createdAt: at, updatedAt: at,
+          mergedInto: null, createdAt: at, updatedAt: at, reviewerNotifiedAt: null,
           history: [{ type: 'submitted', source: 'discord_bot', at }],
         };
         mvp.reports.push(report);
@@ -304,6 +304,18 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
         .filter((report) => report.reporterDiscordId === discordUserId)
         .map((report) => ({ id: report.id, status: report.status, incidentId: report.incidentId,
           mergedInto: report.mergedInto, createdAt: report.createdAt, updatedAt: report.updatedAt })));
+    },
+    listUnnotifiedReviewerReports() {
+      return store.read((state) => readMvp(state).reports
+        .filter((report) => report.status === 'submitted' && !report.reviewerNotifiedAt)
+        .map(({ id, createdAt }) => ({ id, createdAt })));
+    },
+    recordReviewerReportNotification(id) {
+      return store.update((state) => {
+        const report = find(mvpState(state).reports, id, 'Report');
+        if (!report.reviewerNotifiedAt) report.reviewerNotifiedAt = now();
+        return { id: report.id, reviewerNotifiedAt: report.reviewerNotifiedAt };
+      });
     },
     listReports(reviewerId) { actor(reviewerId); return store.read((state) => readMvp(state).reports); },
     getReport(id, reviewerId) { actor(reviewerId); return store.read((state) => find(readMvp(state).reports, id, 'Report')); },
@@ -374,6 +386,28 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
         return proposalResult(proposal);
       });
     },
+    rejectProposal(id, reviewerId, input) {
+      const reviewer = actor(reviewerId);
+      const reason = text(object(input, 'rejection').reason, 'reason', 20, 1000);
+      return store.update((state) => {
+        const mvp = mvpState(state);
+        const proposal = find(mvp.proposals, id, 'Proposal');
+        if (proposal.status !== 'pending') fail(409, 'invalid_transition', 'Proposal is not pending');
+        if (proposal.rosterFingerprint !== rosterFingerprint) fail(409, 'reviewer_roster_changed', 'Reviewer roster changed; recreate the proposal under the current roster');
+        const report = find(mvp.reports, proposal.reportId, 'Report');
+        noSelfReview(report, reviewer);
+        if (proposal.approvals.some((item) => item.reviewerId === reviewer.id)) fail(409, 'already_approved', 'A reviewer cannot approve and reject the same proposal');
+        if (proposal.rejections?.some((item) => item.reviewerId === reviewer.id)) fail(409, 'duplicate_rejection', 'Reviewer already rejected this proposal');
+        const at = now();
+        proposal.status = 'rejected';
+        proposal.rejections ??= [];
+        proposal.rejections.push({ reviewerId: reviewer.id, at, reason });
+        proposal.rejectedAt = at;
+        report.updatedAt = at;
+        report.history.push({ type: 'publication_rejected', actor: reviewer.id, at, proposalId: proposal.id, reason });
+        return proposalResult(proposal);
+      });
+    },
     cancelProposal(id, reviewerId, input) {
       const reviewer = actor(reviewerId);
       if (!demo && !reviewer.isLead) fail(403, 'lead_required', 'Only the configured Lead can cancel a pending proposal');
@@ -390,6 +424,17 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
       });
     },
     getProposal(id, reviewerId) { actor(reviewerId); return store.read((state) => find(readMvp(state).proposals, id, 'Proposal')); },
+    listProposals(reviewerId) {
+      actor(reviewerId);
+      return store.read((state) => readMvp(state).proposals
+        .filter((proposal) => proposal.status === 'pending')
+        .map((proposal) => ({
+          id: proposal.id, reportId: proposal.reportId, status: proposal.status,
+          level: proposal.level, severity: proposal.severity, title: proposal.title,
+          approvals: proposal.approvals.length, rejections: proposal.rejections?.length ?? 0,
+          requiredApprovals: demo ? 1 : proposal.policy.count,
+        })));
+    },
     // Trusted-bot discovery feed: pending proposals that have the required non-Lead
     // votes but still wait on the Lead. The Discord adapter uses this to DM the Lead
     // and then confirm the delivery attempt via recordLeadNotification, which is what

@@ -11,11 +11,14 @@
   var formatSeverity = function (severity) {
     return severity ? severity.charAt(0).toUpperCase() + severity.slice(1) + ' severity' : 'No severity';
   };
+  var formatLevel = function (level) {
+    return String(level).replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+  };
   var render = function (incident) {
     var card = el('article');
     if (incident.level === 'credible_threat' || incident.level === 'confirmed_incident') card.classList.add('top');
     var head = el('p');
-    head.append(el('span', 'level', incident.level.replace(/_/g, ' ')));
+    head.append(el('span', 'level', formatLevel(incident.level)));
     head.append(el('span', 'sev', formatSeverity(incident.severity)));
     card.append(head);
     card.append(el('h3', null, incident.title));

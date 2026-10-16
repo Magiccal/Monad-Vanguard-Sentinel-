@@ -172,6 +172,19 @@ const LEVEL_COLORS = {
   false_alarm: 0x34495e,
 };
 
+const LEVEL_LABELS = {
+  informational: 'Informational',
+  under_investigation: 'Under Investigation',
+  credible_threat: 'Credible Threat',
+  confirmed_incident: 'Confirmed Incident',
+  resolved: 'Resolved',
+  false_alarm: 'False Alarm',
+};
+
+function levelLabel(level) {
+  return LEVEL_LABELS[level] ?? String(level).replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export function incidentEmbed(incident) {
   const severity = incident.severity ? String(incident.severity).toUpperCase() : 'N/A';
   const bullets = (incident.advice ?? []).map((line) => `• ${line}`).join('\n');
@@ -179,16 +192,17 @@ export function incidentEmbed(incident) {
     .setTitle(`${incident.id} — ${incident.title}`)
     .setColor(LEVEL_COLORS[incident.level] ?? 0x808080)
     .addFields(
-      { name: 'Level', value: String(incident.level), inline: true },
+      { name: 'Level', value: levelLabel(incident.level), inline: true },
       { name: 'Severity', value: severity, inline: true },
       { name: 'What happened', value: String(incident.summary).slice(0, 1024) },
       { name: 'What you should do', value: bullets.slice(0, 1024) || '—' },
     )
-    .setFooter({ text: `${incident.disclaimer} · Not financial advice` })
+    // incident.disclaimer already ends with "Not financial advice" — do not append it again.
+    .setFooter({ text: String(incident.disclaimer ?? 'Independent community project · Not affiliated with Monad Foundation · Not financial advice') })
     .setTimestamp(new Date(incident.updatedAt ?? Date.now()));
 }
 
 export function formatIncidentLine(incident) {
   const severity = incident.severity ? ` / ${incident.severity}` : '';
-  return `**${incident.id}** [${incident.level}${severity}] ${incident.title}`;
+  return `**${incident.id}** [${levelLabel(incident.level)}${severity}] ${incident.title}`;
 }

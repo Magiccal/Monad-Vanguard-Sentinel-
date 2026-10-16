@@ -590,3 +590,61 @@ test('MVP integration examples follow the trusted report and two-reviewer public
   assert.equal(incident.evidence[0].reference, publicExample.incidents[0].evidence[0].reference);
   assert.equal(JSON.stringify(incident).includes(privateExample.targets[0].value), false);
 });
+
+test('HTTP proposal cancellation requires the Lead and hides the private source report', async () => {
+  const store = await Store.open();
+  const mvp = createMvpService(store, { reviewers });
+  const server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers, discordBotToken: botToken });
+  const report = await mvp.submitDiscord({ description: 'A fictional report for the HTTP cancellation endpoint.', evidence: [transactionEvidence] }, reporterDiscordId);
+  const evidenceId = mvp.getReport(report.id, reviewers[0].id).evidence[0].id;
+  const proposed = await invoke(server, 'POST', `/v1/mvp/reports/${report.id}/publication`, {
+    ...publicNarrative,
+    level: 'credible_threat', severity: 'low', title: 'Fictional HTTP cancellation review',
+    advice: ['Check the project channels while reviewers investigate the claim.'],
+    reason: 'Fictional evidence was selected for the HTTP cancellation test.',
+    publicEvidenceIds: [evidenceId],
+  }, reviewers[0].token);
+  assert.equal(proposed.status, 200);
+  assert.equal(proposed.body.status, 'pending');
+  const reason = 'The Lead cancelled this fictional proposal through the HTTP endpoint.';
+  assert.equal((await invoke(server, 'POST', `/v1/mvp/proposals/${proposed.body.id}/cancel`, { reason })).status, 401);
+  assert.equal((await invoke(server, 'POST', `/v1/mvp/proposals/${proposed.body.id}/cancel`, { reason: 'too short' }, reviewers[2].token)).body.error, 'invalid_input');
+  assert.equal((await invoke(server, 'POST', `/v1/mvp/proposals/${proposed.body.id}/cancel`, { reason }, reviewers[0].token)).body.error, 'lead_required');
+  const cancelled = await invoke(server, 'POST', `/v1/mvp/proposals/${proposed.body.id}/cancel`, { reason }, reviewers[2].token);
+  assert.equal(cancelled.status, 200);
+  assert.equal(cancelled.body.status, 'cancelled');
+  assert.equal(cancelled.body.id, proposed.body.id);
+  assert.deepEqual((await invoke(server, 'GET', '/v1/mvp/proposals', undefined, reviewers[2].token)).body.proposals, []);
+  assert.equal((await invoke(server, 'GET', '/v1/mvp/incidents')).body.incidents.length, 0);
+  const privateReport = await invoke(server, 'GET', `/v1/mvp/reports/${report.id}`, undefined, reviewers[2].token);
+  assert.equal(privateReport.body.status, 'submitted');
+  assert.equal((await invoke(server, 'POST', `/v1/mvp/proposals/${proposed.body.id}/cancel`, { reason }, reviewers[2].token)).body.error, 'invalid_transition');
+});
+
+test('public incident detail endpoint serves the sanitized incident without authentication', async () => {
+  const store = await Store.open();
+  const mvp = createMvpService(store, { reviewers });
+  const server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers, discordBotToken: botToken });
+  const report = await mvp.submitDiscord({ description: 'A fictional report for the public incident detail endpoint.', evidence: [transactionEvidence] }, reporterDiscordId);
+  const evidenceId = mvp.getReport(report.id, reviewers[0].id).evidence[0].id;
+  const proposal = await invoke(server, 'POST', `/v1/mvp/reports/${report.id}/publication`, {
+    ...publicNarrative,
+    level: 'credible_threat', severity: 'medium', title: 'Fictional incident detail warning',
+    advice: ['Pause interactions with the fictional service while reviewers check the evidence.'],
+    reason: 'This fictional proposal exists to exercise the public incident detail route.',
+    publicEvidenceIds: [evidenceId],
+  }, reviewers[0].token);
+  assert.equal(proposal.status, 200);
+  const approved = await invoke(server, 'POST', `/v1/mvp/proposals/${proposal.body.id}/approval`, undefined, reviewers[1].token);
+  assert.equal(approved.body.status, 'published');
+  const incidentId = approved.body.publishedIncident.id;
+  assert.ok(incidentId);
+  const detail = await invoke(server, 'GET', `/v1/mvp/incidents/${incidentId}`);
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.id, incidentId);
+  assert.equal(detail.body.title, 'Fictional incident detail warning');
+  assert.deepEqual(detail.body.evidence.map((item) => item.kind), ['transaction']);
+  assert.equal(JSON.stringify(detail.body).includes(reporterDiscordId), false);
+  assert.equal(JSON.stringify(detail.body).includes('A fictional report for the public incident detail endpoint.'), false);
+  assert.equal((await invoke(server, 'GET', '/v1/mvp/incidents/SEN-9999')).body.error, 'not_found');
+});

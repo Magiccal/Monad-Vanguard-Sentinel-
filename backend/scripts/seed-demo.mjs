@@ -34,30 +34,22 @@ if (hasReports) {
     publicEvidenceIds: r1.evidence.map((item) => item.id),
   });
 
-  // R-0002 -> confirmed_incident (critical) -> false_alarm closure
+  // R-0002 -> credible_threat (high): fictional Velunor fake claim site, matches the demo video and Metropolis write-up
   await mvp.submitDiscord({
-    description: 'A fictional Monad DeFi app paused withdrawals and its admin multisig rotated signers to unknown addresses.',
-    incidentType: 'exploit_hack',
-    targets: [{ kind: 'address', value: '0x000000000000000000000000000000000000dEaD' }],
-    evidence: [{ kind: 'transaction', reference: `0x${'a'.repeat(64)}`, note: 'Fictional multisig rotation transaction used for the demo.' }],
+    description: 'DEMO CONTENT. A fake claim site for the fictional Velunor project is asking users to connect their wallets. Velunor is fictional and used only for this demonstration.',
+    incidentType: 'phishing',
+    targets: [{ kind: 'url', value: 'https://velunor-claim.xyz' }],
+    evidence: [{ kind: 'official_statement', reference: 'https://velunor.example/announcements/fake-claim-warning', note: 'Fictional Velunor warning about the fake claim site, used for the demo.' }],
   }, '200000000000000002');
   const r2 = mvp.listReports('demo-reviewer')[1];
-  const confirmed = await mvp.proposeFromReport(r2.id, 'demo-reviewer', {
-    level: 'confirmed_incident', severity: 'critical',
-    title: 'Fictional DeFi app withdrawal pause (demo)',
-    summary: 'DEMO CONTENT. A fictional app paused withdrawals after an unverified multisig change. This entry demonstrates a confirmed-incident publication.',
-    verificationNote: 'Demo reviewer inspected the fictional transaction and the fictional team announcement.',
-    advice: ['Treat this fictional app as untrusted.', 'Wait for the fictional team\'s official update before any interaction.'],
-    reason: 'Publishing as a confirmed incident because the fictional multisig change was verified onchain.',
+  await mvp.proposeFromReport(r2.id, 'demo-reviewer', {
+    level: 'credible_threat', severity: 'high',
+    title: 'Fake Velunor ($VLN) claim site',
+    summary: 'DEMO CONTENT. A fake Velunor claim site, velunor-claim[.]xyz, is asking users to connect their wallets. Velunor is a fictional project used only for this demonstration.',
+    verificationNote: 'Reporter screenshots and the fake claim page were reviewed before publication.',
+    advice: ['Do not connect your wallet to velunor-claim[.]xyz.', 'If you connected, revoke any approvals you gave the site now.', 'Only trust links posted in Velunor\'s official channels.'],
+    reason: 'Publishing as a credible threat because the fake claim page actively requests wallet connections.',
     publicEvidenceIds: r2.evidence.map((item) => item.id),
-  });
-  await mvp.proposeFromIncident(confirmed.publishedIncident.id, 'demo-reviewer', {
-    level: 'false_alarm', severity: 'critical',
-    title: 'Fictional DeFi app withdrawal pause (demo)',
-    summary: 'DEMO CONTENT. The fictional team confirmed the multisig change was a planned maintenance key rotation; the earlier alert is closed as a false alarm.',
-    verificationNote: 'Fictional team statement reviewed by the demo reviewer before closing.',
-    advice: ['No action needed.'],
-    reason: 'Two confirmation steps checked out; this demonstrates a false-alarm closure.',
   });
 
   // R-0003 -> informational (published)

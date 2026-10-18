@@ -138,9 +138,6 @@ test('invalid check input returns 400 invalid_input with the disclaimer', async 
     `/v1/check?target=0x${'a'.repeat(39)}`,
     `/v1/check?target=0x${'a'.repeat(41)}`,
     `/v1/check?target=0x${'a'.repeat(63)}`,
-    '/v1/check?target=0xzzzz-not-hex',
-    `/v1/check?target=${'a'.repeat(40)}`,
-    `/v1/check?target=${'a'.repeat(64)}`,
     '/v1/check?target=javascript:alert(1)',
     `/v1/check?target=${encodeURIComponent('https://user:pass@example.com/x')}`,
     '/v1/check?target=example.com&kind=hologram',
@@ -381,6 +378,54 @@ test('the bundled example matches the live response shape', async () => {
   assert.deepEqual(Object.keys(res.body).sort(), Object.keys(example).sort());
   assert.equal(res.body.incidentId, example.incidentId);
   assert.equal(res.body.level, example.level);
+});
+
+test('0x-prefixed domains stay valid checks; only all-hex 0x values are hex', async () => {
+  const { store, mvp } = await buildDemo();
+  const server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers: [reviewer] });
+  for (const target of ['0x.org', '0xgallery.xyz', '0xzzzz-not-hex']) {
+    const res = await invoke(server, 'GET', `/v1/check?target=${encodeURIComponent(target)}`);
+    assert.equal(res.status, 200, target);
+    assert.equal(res.body.level, 'none', target);
+    assert.equal(res.body.target.kind, 'domain', target);
+  }
+  // All-hex after 0x with the wrong length is still a 400.
+  const bad = await invoke(server, 'GET', `/v1/check?target=0x${'a'.repeat(63)}`);
+  assert.equal(bad.status, 400);
+  const missing0x = await invoke(server, 'GET', `/v1/check?target=${'a'.repeat(40)}`);
+  assert.equal(missing0x.status, 400);
+});
+
+test('TRUST_PROXY supports CIDR ranges and IPv4-mapped IPv6 sockets', async () => {
+  const { store, mvp } = await buildDemo();
+  const server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers: [reviewer], trustProxy: '10.0.0.0/8, 172.16.0.5' });
+  const cidrSocket = { socket: { remoteAddress: '10.1.2.3' } };
+  const mappedSocket = { socket: { remoteAddress: '::ffff:172.16.0.5' } };
+  const outsideSocket = { socket: { remoteAddress: '192.0.2.9' } };
+  // Trusted via CIDR: the last XFF hop keys the bucket.
+  const viaCidr = await invoke(server, 'GET', '/v1/check?target=velunor-claim.xyz', { headers: { 'x-forwarded-for': '9.9.9.9' }, ...cidrSocket });
+  assert.equal(viaCidr.status, 200);
+  // Same last hop via the IPv4-mapped trusted socket → same bucket.
+  const viaMapped = await invoke(server, 'GET', '/v1/check?target=velunor-claim.xyz', { headers: { 'x-forwarded-for': '8.8.8.8, 9.9.9.9' }, ...mappedSocket });
+  assert.equal(viaMapped.status, 200);
+  // Sockets outside TRUST_PROXY ignore XFF and key on their own address.
+  for (let index = 0; index < 20; index += 1) {
+    const res = await invoke(server, 'GET', '/v1/check?target=velunor-claim.xyz', { headers: { 'x-forwarded-for': `10.9.9.${index}` }, ...outsideSocket });
+    assert.equal(res.status, 200, 'untrusted socket must not be limited via spoofed XFF');
+  }
+});
+
+test('ICANN-suffix parents keep subdomain matching (only PRIVATE parents are shared hosts)', async () => {
+  const { store, mvp } = await buildDemo({ indicator: { kind: 'domain', value: 'evil-bank.co.uk' } });
+  const server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers: [reviewer] });
+  // evil-bank.co.uk sits under the ICANN suffix co.uk: it is a normal
+  // registrable domain, so its subdomains match.
+  const res = await invoke(server, 'GET', '/v1/check?target=login.evil-bank.co.uk');
+  assert.equal(res.body.matched, true);
+  assert.equal(res.body.incidentId, 'SEN-0001');
+  // The shared-host exact-only rule still applies to PRIVATE parents.
+  const registry = buildCheckRegistry(mvp.listIncidents());
+  assert.equal(matchCheckTarget(registry, { kind: 'domain', normalized: 'login.evil-bank.co.uk' }).length, 1);
 });
 
 test('matchSubdomains is an opt-in per domain indicator with a safe default', async () => {

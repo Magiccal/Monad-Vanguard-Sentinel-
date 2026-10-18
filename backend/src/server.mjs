@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { BlockList, isIP } from 'node:net';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
@@ -43,15 +44,36 @@ function respondCheck(res, status, body, headers = {}, head = false) {
   res.end(head ? undefined : JSON.stringify(body));
 }
 
-// Ollie 2026-10-18 (issue #9 review): X-Forwarded-For must only be trusted
+// Ollie 2026-10-18 (issue #9 recheck): X-Forwarded-For must only be trusted
 // when the direct socket peer is the configured trusted proxy. TRUST_PROXY
-// (or the trustProxy option) is a comma-separated proxy IP list, or "*" for
-// the hosted sandbox where every connection arrives through the platform
-// proxy. Otherwise the socket address is used, so a client cannot forge its
-// way into another user's bucket. Raw IPs are never persisted.
-function checkClientIp(req, trustProxy) {
-  const socketAddress = req.socket?.remoteAddress ?? 'unknown';
-  if (trustProxy.length && (trustProxy.includes('*') || trustProxy.includes(socketAddress))) {
+// (or the trustProxy option) is a comma-separated list of exact IPs or CIDR
+// ranges (net.BlockList); '*' is intentionally NOT supported because the
+// Dockerfile binds 0.0.0.0 and the container is directly reachable, so a
+// wildcard would let any client spoof its way past the limit. IPv4-mapped
+// IPv6 sockets (::ffff:a.b.c.d) are normalized before matching. Raw IPs are
+// never persisted.
+function parseTrustProxy(spec) {
+  const items = (spec ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+  const list = new BlockList();
+  for (const item of items) {
+    if (item.includes('/') && isIP(item.split('/')[0])) {
+      const [address, prefix] = item.split('/');
+      try { list.addSubnet(address, Number(prefix)); } catch { /* ignore malformed entry */ }
+    } else if (isIP(item)) {
+      try { list.addAddress(item); } catch { /* ignore malformed entry */ }
+    }
+  }
+  return list;
+}
+
+function normalizeSocketAddress(address) {
+  if (typeof address !== 'string' || !address) return 'unknown';
+  return address.startsWith('::ffff:') ? address.slice(7) : address;
+}
+
+function checkClientIp(req, trustList) {
+  const socketAddress = normalizeSocketAddress(req.socket?.remoteAddress);
+  if (trustList && trustList.check(socketAddress)) {
     const forwarded = req.headers['x-forwarded-for'];
     if (typeof forwarded === 'string' && forwarded.trim()) {
       const hops = forwarded.split(',').map((hop) => hop.trim()).filter(Boolean);
@@ -126,12 +148,13 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
   const checkLimiter = createRateLimiter({ limit: 60, windowMs: 60000, burst: 20 });
   // Salted 7-day abuse log; enabled only when CHECK_LOG_SALT is configured.
   const checkQueryLog = createQueryLog({ salt: process.env.CHECK_LOG_SALT || null });
-  // TRUST_PROXY: comma-separated trusted proxy IPs, or "*". Empty = never
-  // trust X-Forwarded-For (rate buckets key on the socket address).
-  const trustProxyList = typeof trustProxy === 'string'
-    ? trustProxy.split(',').map((item) => item.trim()).filter(Boolean)
-    : Array.isArray(trustProxy) ? trustProxy
-      : (process.env.TRUST_PROXY ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+  // TRUST_PROXY: comma-separated trusted proxy IPs or CIDR ranges (e.g.
+  // "10.0.0.0/8, 172.16.0.5"). Empty = never trust X-Forwarded-For; buckets
+  // key on the socket address. No wildcard support on purpose — the container
+  // binds 0.0.0.0 and is directly reachable (Ollie 2026-10-18 recheck).
+  const trustProxyList = parseTrustProxy(
+    typeof trustProxy === 'string' ? trustProxy : (process.env.TRUST_PROXY ?? ''),
+  );
   const configuredReviewers = reviewers ?? [{ id: reviewerId, token: reviewerToken }];
   if (![1, 3].includes(configuredReviewers.length) || configuredReviewers.some((item) =>
     typeof item.id !== 'string' || item.id.trim().length < 2 || typeof item.token !== 'string' || item.token.length < 24) ||
@@ -362,10 +385,16 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
       }
     })().catch((error) => {
       if (res.headersSent) return res.end();
+      // Ollie 2026-10-18 recheck: even unexpected errors on the check route
+      // must carry CORS headers and the disclaimer.
+      let isCheckRoute = false;
+      try { isCheckRoute = new URL(req.url, 'http://localhost').pathname === '/v1/check'; } catch { /* keep false */ }
       if (error instanceof DomainError) {
+        if (isCheckRoute) return respondCheck(res, error.status, { error: error.code, message: error.message, disclaimer: DISCLAIMER }, checkHeaders());
         return respond(res, error.status, { error: error.code, message: error.message });
       }
       console.error(error);
+      if (isCheckRoute) return respondCheck(res, 500, { error: 'internal_error', message: 'Internal server error', disclaimer: DISCLAIMER }, checkHeaders());
       return respond(res, 500, { error: 'internal_error', message: 'Internal server error' });
     });
   });

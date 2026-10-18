@@ -106,11 +106,12 @@ export function normalizeCheckInput({ target, kind } = {}) {
   if (!CHECK_KINDS.includes(resolved)) {
     fail(400, 'invalid_input', 'kind must be domain, url, address, or transaction_hash');
   }
-  // Ollie 2026-10-18: malformed hex must be a 400, never a 200 "none" — any
-  // value starting with 0x that is not exactly 40/64 hex, and any bare 40/64
-  // hex without the 0x prefix, is rejected outright.
+  // Ollie 2026-10-18 recheck: only treat input as hex when EVERYTHING after
+  // "0x" is hex — otherwise domains like 0x.org or 0xgallery.xyz are valid
+  // domain checks. Such all-hex values must still be exactly 40/64 digits
+  // (else 400), and bare 40/64 hex without the 0x prefix is also a 400.
   const trimmedTarget = target.trim();
-  if (/^0x/i.test(trimmedTarget) && !/^0x([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(trimmedTarget)) {
+  if (/^0x[0-9a-fA-F]+$/.test(trimmedTarget) && !/^0x([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(trimmedTarget)) {
     fail(400, 'invalid_input', '0x value must be a 40-hex address or 64-hex transaction hash');
   }
   if (/^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(trimmedTarget)) {

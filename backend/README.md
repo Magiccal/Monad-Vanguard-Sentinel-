@@ -118,3 +118,15 @@ To publish a verified report, `POST /v1/reports/:id/decision` requires `outcome`
 ### Legacy limits before deployment
 
 The shared token, self-declared reporter label, single-process JSON store, and loopback listener are for a local demo. Production authentication, storage, rate limiting, source credibility rules, notification delivery, and any onchain write design remain team decisions. Watch scans are manual and do not reconcile chain reorganizations. A successful transaction, matching target address, or manual `verified` status is not a guarantee that a contract is safe.
+
+## Check API (MVP, issue #8 phase 1)
+
+`GET /v1/check?target=<domain|url|0x-address|0x-tx-hash>[&kind=...]` is a keyless, rate-limited lookup over the public incident indicator registry. `level: "none"` is not a safety guarantee. See [`mvp-openapi.json`](mvp-openapi.json) (`/v1/check`) and [`examples/check-match-response.json`](examples/check-match-response.json).
+
+Operational notes:
+
+- **Rate limiting** is a token bucket of 60 requests/min per client IP (burst 20). The bucket key is the last `X-Forwarded-For` hop — the value appended by the hosting proxy — so a spoofed first hop cannot dodge the limit. Raw IPs are never persisted.
+- **Caching**: 200 responses send `Cache-Control: public, max-age=60, stale-while-revalidate=60` and a weak `ETag` derived from the registry version; `If-None-Match` returns 304. 4xx/5xx responses stay `no-store` and always carry the disclaimer.
+- **PSL / shared-host snapshot**: `src/psl-snapshots.mjs` holds a curated offline subset of publicsuffix.org pinned as version `2026-10-18.1` (snapshot date 2026-10-18). Bare shared-host or public-suffix roots (`vercel.app`, `co.uk`, …) are rejected as indicators at proposal time; full subdomains are allowed and match exactly unless the proposal opts into `matchSubdomains: true` per indicator.
+- **Query logging** (abuse investigation only): enabled by setting `CHECK_LOG_SALT` to a secret environment value. Only a salted hash of the normalized target and of the client IP is kept, in memory, for at most 7 days; raw values are never stored and nothing touches disk. Rotate the salt every 30 days — safe because entries expire after 7 days. Without `CHECK_LOG_SALT` nothing is logged.
+- **`incidentUrl`** points to the public page anchor `…/mvp.html#SEN-####`; set `PUBLIC_BASE_URL` so the field carries the hosted domain. A dedicated detail page can replace the anchor later.

@@ -112,7 +112,9 @@ function publicIncident(incident) {
     // Issue #8: indicators are reviewer-selected check targets. They are public
     // data (the check API matches against them), so the public page shows the
     // same list; closed incidents keep them with active: false.
-    indicators: (incident.indicators ?? []).map(({ kind, value, active }) => ({ kind, value, active })),
+    indicators: (incident.indicators ?? []).map(({ kind, value, active, matchSubdomains }) => ({
+      kind, value, active, ...(matchSubdomains !== undefined ? { matchSubdomains } : {}),
+    })),
     timeline: incident.versions.map(({ at, level, severity, summary }) => ({ at, level, severity, summary })),
     publishedAt: incident.publishedAt, updatedAt: incident.updatedAt,
     version: incident.versions.length,

@@ -136,6 +136,15 @@ export function validateProposalIndicators(value) {
     if (!CHECK_KINDS.includes(kind)) {
       fail(400, 'invalid_input', 'indicator kind must be domain, url, address, or transaction_hash');
     }
+    // Ollie 2026-10-18: reviewers may opt into subdomain matching per domain
+    // indicator (same quorum + Lead gate); the default stays exact-plus-
+    // subdomains for normal domains and exact-only on shared hosts.
+    let matchSubdomains;
+    if (item.matchSubdomains !== undefined) {
+      if (kind !== 'domain') fail(400, 'invalid_input', 'matchSubdomains is only valid on domain indicators');
+      if (typeof item.matchSubdomains !== 'boolean') fail(400, 'invalid_input', 'matchSubdomains must be a boolean');
+      matchSubdomains = item.matchSubdomains;
+    }
     let normalized = null;
     if (kind === 'domain') {
       normalized = normalizeDomainValue(item.value);
@@ -152,7 +161,7 @@ export function validateProposalIndicators(value) {
       normalized = kind === 'address' ? normalizeAddress(item.value) : normalizeTransactionHash(item.value);
       if (!normalized) fail(400, 'invalid_input', `Invalid ${kind} indicator`);
     }
-    out.push({ kind, value: normalized });
+    out.push(matchSubdomains === undefined ? { kind, value: normalized } : { kind, value: normalized, matchSubdomains });
   }
   const seen = new Set(out.map((item) => `${item.kind}|${item.value}`));
   if (seen.size !== out.length) fail(400, 'invalid_input', 'indicators must be distinct after normalization');
@@ -191,7 +200,10 @@ export function buildCheckRegistry(publicIncidents) {
       if (!CHECK_KINDS.includes(indicator.kind) || typeof indicator.value !== 'string') continue;
       const entry = { kind: indicator.kind, value: indicator.value, active: indicator.active ?? base.active, ...base };
       if (indicator.kind === 'domain') {
-        domain.push({ ...entry, exactOnly: isSharedHostSubdomain(indicator.value) });
+        // Shared-host subdomains match exactly only, unless the reviewer
+        // explicitly opted into subdomain matching at proposal time.
+        const exactOnly = isSharedHostSubdomain(indicator.value) && indicator.matchSubdomains !== true;
+        domain.push({ ...entry, exactOnly });
       } else if (indicator.kind === 'url') {
         url.push(entry);
       } else {

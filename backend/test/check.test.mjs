@@ -290,3 +290,59 @@ test('the bundled example matches the live response shape', async () => {
   assert.equal(res.body.incidentId, example.incidentId);
   assert.equal(res.body.level, example.level);
 });
+
+test('a spoofed X-Forwarded-For first hop cannot dodge the rate limit', async () => {
+  const { store, mvp } = await buildDemo();
+  const server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers: [reviewer] });
+  // The hosting proxy appends the real client IP after any client-supplied
+  // hops, so buckets are keyed on the LAST hop: rotating spoofed values shares
+  // one bucket with the honest header.
+  const honest = '9.9.9.9';
+  const spoofVariants = [`1.2.3.4, ${honest}`, `5.6.7.8, ${honest}`, `a.a.a.a, b.b.b.b, ${honest}`, honest];
+  let limited = 0;
+  for (let index = 0; index < 25; index += 1) {
+    const forwarded = spoofVariants[index % spoofVariants.length];
+    const res = await invoke(server, 'GET', '/v1/check?target=velunor-claim.xyz', { headers: { 'x-forwarded-for': forwarded } });
+    if (res.status === 429) limited += 1;
+  }
+  assert.ok(limited > 0, 'spoofed header rotation must not bypass the shared bucket');
+});
+
+test('matchSubdomains is an opt-in per domain indicator with a safe default', async () => {
+  const { store, mvp } = await buildDemo({ indicator: null });
+  await mvp.submitDiscord({
+    description: 'DEMO CONTENT. A report listing a shared-host subdomain indicator with subdomain matching enabled.',
+    incidentType: 'phishing', targets: [{ kind: 'url', value: 'https://evil.vercel.app/claim' }],
+  }, '200000000000000004');
+  const report = mvp.listReports(reviewer.id)[1];
+  // matchSubdomains is domain-only and must be a boolean.
+  await assert.rejects(() => mvp.proposeFromReport(report.id, reviewer.id, {
+    level: 'under_investigation', severity: 'medium',
+    title: 'Bad matchSubdomains on url', summary: 'DEMO CONTENT. This proposal must be rejected because matchSubdomains is not valid on url indicators.',
+    verificationNote: 'The indicator options are invalid, so the proposal must not be created.',
+    advice: ['Do not interact with this fictional target.'],
+    reason: 'matchSubdomains only applies to domain indicators per the check API spec.',
+    indicators: [{ kind: 'url', value: 'https://evil.vercel.app/x', matchSubdomains: true }],
+  }), (error) => error.code === 'invalid_input');
+  await assert.rejects(() => mvp.proposeFromReport(report.id, reviewer.id, {
+    level: 'under_investigation', severity: 'medium',
+    title: 'Bad matchSubdomains type', summary: 'DEMO CONTENT. This proposal must be rejected because matchSubdomains is not a boolean.',
+    verificationNote: 'The indicator options are invalid, so the proposal must not be created.',
+    advice: ['Do not interact with this fictional target.'],
+    reason: 'matchSubdomains must be a boolean when provided on a domain indicator.',
+    indicators: [{ kind: 'domain', value: 'evil.vercel.app', matchSubdomains: 'yes' }],
+  }), (error) => error.code === 'invalid_input');
+  // Opt-in: the published shared-host indicator now covers its subdomains.
+  await mvp.proposeFromReport(report.id, reviewer.id, {
+    level: 'under_investigation', severity: 'medium',
+    title: 'Shared-host subdomain opt-in', summary: 'DEMO CONTENT. This proposal opts into subdomain matching for a shared-host subdomain.',
+    verificationNote: 'The reviewer opted into subdomain matching under the same quorum gate.',
+    advice: ['Do not interact with this fictional target.'],
+    reason: 'Opting into subdomain matching for a shared-host subdomain is now supported.',
+    indicators: [{ kind: 'domain', value: 'evil.vercel.app', matchSubdomains: true }],
+  });
+  const registry = buildCheckRegistry(mvp.listIncidents());
+  assert.equal(matchCheckTarget(registry, { kind: 'domain', normalized: 'app.evil.vercel.app' }).length, 1);
+  // The platform root itself still never matches.
+  assert.equal(matchCheckTarget(registry, { kind: 'domain', normalized: 'vercel.app' }).length, 0);
+});

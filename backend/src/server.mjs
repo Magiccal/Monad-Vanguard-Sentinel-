@@ -8,6 +8,7 @@ import { createMvpService, DISCLAIMER } from './mvp.mjs';
 import { Store } from './store.mjs';
 import { createRpcClient, inspectTransactionEvidence, inspectWatchTarget } from './rpc.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
+import { createQueryLog } from './query-log.mjs';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -39,13 +40,17 @@ function respondCheck(res, status, body, headers = {}, head = false) {
   res.end(head ? undefined : JSON.stringify(body));
 }
 
-// Behind the hosted reverse proxy the direct socket address is the proxy, so
-// the first X-Forwarded-For hop is used when present. A spoofed XFF only
-// isolates the caller's own rate-limit bucket, so this is safe for a keyless
-// public endpoint; raw IPs are never persisted.
+// Ollie 2026-10-18: trust only the hop appended by the hosting proxy. Clients
+// can put arbitrary values in X-Forwarded-For, but the platform proxy appends
+// the real client address after them, so the LAST hop is the trustworthy one;
+// a spoofed first hop cannot dodge the limit because the bucket is keyed on
+// the proxy-appended value. Raw IPs are never persisted.
 function checkClientIp(req) {
   const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim();
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    const hops = forwarded.split(',').map((hop) => hop.trim()).filter(Boolean);
+    if (hops.length) return hops[hops.length - 1];
+  }
   return req.socket?.remoteAddress ?? 'unknown';
 }
 
@@ -112,6 +117,8 @@ async function readJson(req) {
 export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers = null, discordBotToken = null, mvp = null, rpc = null }) {
   // Issue #8: token bucket for the keyless check API — 60 req/min per IP, burst 20.
   const checkLimiter = createRateLimiter({ limit: 60, windowMs: 60000, burst: 20 });
+  // Salted 7-day abuse log; enabled only when CHECK_LOG_SALT is configured.
+  const checkQueryLog = createQueryLog({ salt: process.env.CHECK_LOG_SALT || null });
   const configuredReviewers = reviewers ?? [{ id: reviewerId, token: reviewerToken }];
   if (![1, 3].includes(configuredReviewers.length) || configuredReviewers.some((item) =>
     typeof item.id !== 'string' || item.id.trim().length < 2 || typeof item.token !== 'string' || item.token.length < 24) ||
@@ -165,6 +172,7 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
         }
         try {
           const body = mvp.checkTarget({ target: query.get('target'), kind: query.get('kind') });
+          checkQueryLog.record(body.target.normalized, checkClientIp(req));
           const etag = `W/"check-r${mvp.getCheckRegistryVersion()}"`;
           const cacheHeaders = { etag, 'cache-control': 'public, max-age=60, stale-while-revalidate=60', ...rateHeaders };
           if (typeof req.headers['if-none-match'] === 'string' && req.headers['if-none-match'].includes(etag)) {

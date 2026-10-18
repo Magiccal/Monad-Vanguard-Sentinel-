@@ -1,13 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DomainError } from './core.mjs';
 import { detectSensitiveMaterial, inspectPublicSourceUrl, normalizeAddress, normalizeTransactionHash } from './validation.mjs';
+import { normalizeCheckInput, validateProposalIndicators, buildCheckRegistry, matchCheckTarget } from './check.mjs';
 
 const LEVELS = new Set(['informational', 'under_investigation', 'credible_threat', 'confirmed_incident', 'resolved', 'false_alarm']);
 const SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);
 const INCIDENT_TYPES = new Set(['exploit_hack', 'compromised_account', 'malicious_contract', 'phishing', 'rug_pull', 'not_sure']);
 const TARGET_KINDS = new Set(['address', 'transaction_hash', 'url', 'x_handle']);
 const EVIDENCE_KINDS = new Set(['transaction', 'link', 'screenshot', 'official_statement']);
-const DISCLAIMER = 'Independent community project · Not affiliated with Monad Foundation · Not financial advice';
+export const DISCLAIMER = 'Independent community project · Not affiliated with Monad Foundation · Not financial advice';
+const CHECK_NO_MATCH_ADVICE = 'No published Sentinel incident matches this target. This is not a safety guarantee; verify through official channels.';
 
 function fail(status, code, message) { throw new DomainError(status, code, message); }
 function object(value, label) {
@@ -107,11 +109,19 @@ function publicIncident(incident) {
     title: incident.title, summary: incident.summary, verificationNote: incident.verificationNote,
     advice: incident.advice, disclaimer: DISCLAIMER,
     evidence: incident.publicEvidence ?? [],
+    // Issue #8: indicators are reviewer-selected check targets. They are public
+    // data (the check API matches against them), so the public page shows the
+    // same list; closed incidents keep them with active: false.
+    indicators: (incident.indicators ?? []).map(({ kind, value, active, matchSubdomains }) => ({
+      kind, value, active, ...(matchSubdomains !== undefined ? { matchSubdomains } : {}),
+    })),
     timeline: incident.versions.map(({ at, level, severity, summary }) => ({ at, level, severity, summary })),
     publishedAt: incident.publishedAt, updatedAt: incident.updatedAt,
     version: incident.versions.length,
     pendingLeadReview: incident.pendingLeadReview === true,
     approvalMode: incident.approvalMode,
+    approvalCount: incident.approvalCount ?? 0,
+    requiredApprovals: incident.requiredApprovals ?? null,
     ...(incident.leadNotifiedAt ? { leadNotifiedAt: incident.leadNotifiedAt } : {}),
   };
 }
@@ -146,7 +156,7 @@ function approvalState(proposal, reviewerById, demo, rosterFingerprint, atMs) {
   return { ready: false, pendingLeadReview: false };
 }
 
-export function createMvpService(store, { now = () => new Date().toISOString(), reviewers } = {}) {
+export function createMvpService(store, { now = () => new Date().toISOString(), reviewers, publicBaseUrl = null } = {}) {
   if (!Array.isArray(reviewers) || ![1, 3].includes(reviewers.length)) throw new Error('MVP requires one demo reviewer or three individually authenticated reviewers');
   const reviewerById = new Map(reviewers.map((reviewer) => [reviewer.id, reviewer]));
   if (reviewerById.size !== reviewers.length || reviewers.some((reviewer) =>
@@ -189,6 +199,25 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
     incident.verificationNote = proposal.verificationNote;
     incident.advice = proposal.advice;
     incident.publicEvidence = proposal.publicEvidence;
+    // Issue #8: the registry is rebuilt from published incidents. Omitted
+    // indicators carry the previous set over (with matchSubdomains), an
+    // explicit [] removes them, and closed incidents (resolved/false_alarm)
+    // keep their indicators with active:false so a check returns the closure
+    // instead of a stale warning.
+    const closed = ['resolved', 'false_alarm'].includes(proposal.level);
+    const carriedOver = proposal.indicators === null || proposal.indicators === undefined;
+    const indicatorSource = carriedOver
+      ? (incident.indicators ?? []).map(({ kind, value, matchSubdomains }) => (
+        matchSubdomains === undefined ? { kind, value } : { kind, value, matchSubdomains }))
+      : proposal.indicators;
+    incident.indicators = indicatorSource.map((item) => ({ ...item, active: !closed }));
+    // Ollie 2026-10-18: the public page shows the real approval counts instead
+    // of a hardcoded "2 of 3".
+    incident.approvalCount = new Set(proposal.approvals.map((item) => item.reviewerId)).size;
+    incident.requiredApprovals = demo ? 1 : proposal.policy.count;
+    // The check API's weak ETag is derived from this counter; a publication or
+    // correction bumps it so cached results refresh (max-age=60).
+    mvp.registryVersion = (mvp.registryVersion ?? 0) + 1;
     incident.updatedAt = at;
     incident.approvalMode = demo ? 'demo_single_reviewer' : 'three_reviewer_quorum';
     incident.pendingLeadReview = pendingLeadReview;
@@ -251,6 +280,11 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
     if (['credible_threat', 'confirmed_incident'].includes(data.level) && publicEvidence.length === 0) {
       fail(400, 'evidence_required', 'Threat and confirmed incident publication requires explicitly approved public evidence');
     }
+    // Issue #8: reviewers explicitly select check indicators on the proposal
+    // (max 10). They go through the same quorum + Lead gate and are never
+    // copied automatically from the private report targets. Omitted field =
+    // carry the previous indicators over; explicit [] removes them.
+    const indicators = validateProposalIndicators(data.indicators);
     const summary = publicText(data.summary, 'what happened summary', 20, 2000, report.reporterDiscordId);
     if (summary.toLocaleLowerCase() === report.description.toLocaleLowerCase()) {
       fail(400, 'private_report_copy', 'Write a public summary instead of copying the private report description');
@@ -263,6 +297,7 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
       advice: adviceBullets(data.advice, data.level, report.reporterDiscordId),
       reason: text(data.reason, 'reason', 20, 1000),
       publicEvidence,
+      indicators,
       status: 'pending', createdAt: at, policy: policy(data.level, severity, incident), rosterFingerprint,
       approvals: [{ reviewerId: reviewer.id, at }], rejections: [],
     };
@@ -497,6 +532,37 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
     },
     listIncidents() { return store.read((state) => readMvp(state).incidents.map(publicIncident)); },
     getIncident(id) { return store.read((state) => publicIncident(find(readMvp(state).incidents, id, 'Incident'))); },
+    // Issue #8 phase 1: keyless check API read path. Returns only data that is
+    // already on the public incidents page; an unpublished target gets level
+    // "none", which is never a safety guarantee.
+    checkTarget(input) {
+      const checked = normalizeCheckInput(input);
+      return store.read((state) => {
+        const registry = buildCheckRegistry(readMvp(state).incidents.map(publicIncident));
+        const ranked = matchCheckTarget(registry, checked);
+        const top = ranked[0] ?? null;
+        return {
+          target: checked,
+          matched: Boolean(top),
+          level: top ? top.level : 'none',
+          severity: top ? top.severity : null,
+          advice: top ? top.advice : [CHECK_NO_MATCH_ADVICE],
+          verifiedAt: top ? top.verifiedAt : null,
+          incidentId: top ? top.incidentId : null,
+          incidentUrl: top && publicBaseUrl ? `${publicBaseUrl.replace(/\/$/, '')}/mvp.html#${top.incidentId}` : null,
+          matchedIndicator: top ? { kind: top.kind, value: top.value, active: top.active } : null,
+          matches: ranked.map((entry) => ({
+            incidentId: entry.incidentId, level: entry.level, severity: entry.severity,
+            matchedIndicator: { kind: entry.kind, value: entry.value, active: entry.active },
+          })),
+          checkedAt: now(),
+          disclaimer: DISCLAIMER,
+        };
+      });
+    },
+    getCheckRegistryVersion() {
+      return store.read((state) => readMvp(state).registryVersion ?? 0);
+    },
     listNotificationEvents(reviewerId) { actor(reviewerId); return store.read((state) => readMvp(state).notificationEvents); },
   };
 }

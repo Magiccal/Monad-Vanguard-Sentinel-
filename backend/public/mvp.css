@@ -94,3 +94,6 @@ footer {
   padding: 18px 24px 26px;
   text-align: center;
 }
+
+/* Highlight for an incident reached via the check API's incidentUrl anchor. */
+article.anchor-target { outline: 2px solid #1f7a54; }

@@ -1,12 +1,15 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { BlockList, isIP } from 'node:net';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import { createSentinel, DomainError } from './core.mjs';
-import { createMvpService } from './mvp.mjs';
+import { createMvpService, DISCLAIMER } from './mvp.mjs';
 import { Store } from './store.mjs';
 import { createRpcClient, inspectTransactionEvidence, inspectWatchTarget } from './rpc.mjs';
+import { createRateLimiter } from './rate-limit.mjs';
+import { createQueryLog } from './query-log.mjs';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -17,6 +20,67 @@ function respond(res, status, body) {
     'x-content-type-options': 'nosniff',
   });
   res.end(JSON.stringify(body));
+}
+
+// The check API is keyless and CORS-open so wallets, agents and web pages can
+// call it. 200 responses are cacheable for 60s; 4xx/5xx keep no-store.
+function checkHeaders(extra = {}) {
+  return {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET, OPTIONS',
+    'x-content-type-options': 'nosniff',
+    ...extra,
+  };
+}
+
+function respondCheck(res, status, body, headers = {}, head = false) {
+  const isError = status >= 400;
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    // 4xx/5xx stay no-store; only 2xx/304 are cacheable.
+    ...(isError ? { 'cache-control': 'no-store' } : {}),
+    ...headers,
+  });
+  res.end(head ? undefined : JSON.stringify(body));
+}
+
+// Ollie 2026-10-18 (issue #9 recheck): X-Forwarded-For must only be trusted
+// when the direct socket peer is the configured trusted proxy. TRUST_PROXY
+// (or the trustProxy option) is a comma-separated list of exact IPs or CIDR
+// ranges (net.BlockList); '*' is intentionally NOT supported because the
+// Dockerfile binds 0.0.0.0 and the container is directly reachable, so a
+// wildcard would let any client spoof its way past the limit. IPv4-mapped
+// IPv6 sockets (::ffff:a.b.c.d) are normalized before matching. Raw IPs are
+// never persisted.
+function parseTrustProxy(spec) {
+  const items = (spec ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+  const list = new BlockList();
+  for (const item of items) {
+    if (item.includes('/') && isIP(item.split('/')[0])) {
+      const [address, prefix] = item.split('/');
+      try { list.addSubnet(address, Number(prefix)); } catch { /* ignore malformed entry */ }
+    } else if (isIP(item)) {
+      try { list.addAddress(item); } catch { /* ignore malformed entry */ }
+    }
+  }
+  return list;
+}
+
+function normalizeSocketAddress(address) {
+  if (typeof address !== 'string' || !address) return 'unknown';
+  return address.startsWith('::ffff:') ? address.slice(7) : address;
+}
+
+function checkClientIp(req, trustList) {
+  const socketAddress = normalizeSocketAddress(req.socket?.remoteAddress);
+  if (trustList && trustList.check(socketAddress)) {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.trim()) {
+      const hops = forwarded.split(',').map((hop) => hop.trim()).filter(Boolean);
+      if (hops.length) return hops[hops.length - 1];
+    }
+  }
+  return socketAddress;
 }
 
 async function respondStatic(res, pathname, mvpPage = false) {
@@ -79,7 +143,18 @@ async function readJson(req) {
   }
 }
 
-export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers = null, discordBotToken = null, mvp = null, rpc = null }) {
+export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers = null, discordBotToken = null, mvp = null, rpc = null, trustProxy = null }) {
+  // Issue #8: token bucket for the keyless check API — 60 req/min per IP, burst 20.
+  const checkLimiter = createRateLimiter({ limit: 60, windowMs: 60000, burst: 20 });
+  // Salted 7-day abuse log; enabled only when CHECK_LOG_SALT is configured.
+  const checkQueryLog = createQueryLog({ salt: process.env.CHECK_LOG_SALT || null });
+  // TRUST_PROXY: comma-separated trusted proxy IPs or CIDR ranges (e.g.
+  // "10.0.0.0/8, 172.16.0.5"). Empty = never trust X-Forwarded-For; buckets
+  // key on the socket address. No wildcard support on purpose — the container
+  // binds 0.0.0.0 and is directly reachable (Ollie 2026-10-18 recheck).
+  const trustProxyList = parseTrustProxy(
+    typeof trustProxy === 'string' ? trustProxy : (process.env.TRUST_PROXY ?? ''),
+  );
   const configuredReviewers = reviewers ?? [{ id: reviewerId, token: reviewerToken }];
   if (![1, 3].includes(configuredReviewers.length) || configuredReviewers.some((item) =>
     typeof item.id !== 'string' || item.id.trim().length < 2 || typeof item.token !== 'string' || item.token.length < 24) ||
@@ -110,6 +185,43 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
 
       if (req.method === 'GET' && pathname === '/health') {
         return respond(res, 200, { status: 'ok' });
+      }
+      // Issue #8 phase 1: keyless check API (read path). CORS-open so wallets,
+      // agents and pages can call it; 200s cache for 60s; 4xx/5xx stay no-store;
+      // the target is never fetched and no private data can leak (the registry
+      // is built from published incidents only).
+      if (mvp && segments[0] === 'v1' && segments[1] === 'check' && segments.length === 2 && ['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+        const isHead = req.method === 'HEAD';
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, checkHeaders());
+          return res.end();
+        }
+        const query = new URL(req.url, 'http://localhost').searchParams;
+        const gate = checkLimiter.take(checkClientIp(req, trustProxyList));
+        const rateHeaders = {
+          'RateLimit-Limit': '60',
+          'RateLimit-Remaining': String(gate.remaining),
+          'RateLimit-Reset': String(Math.ceil(Date.now() / 1000) + gate.resetSeconds),
+        };
+        if (!gate.ok) {
+          return respondCheck(res, 429, { error: 'rate_limited', message: 'Too many check requests; retry later.', disclaimer: DISCLAIMER }, checkHeaders({ ...rateHeaders, 'retry-after': String(gate.resetSeconds) }), isHead);
+        }
+        try {
+          const body = mvp.checkTarget({ target: query.get('target'), kind: query.get('kind') });
+          checkQueryLog.record(body.target.normalized, checkClientIp(req, trustProxyList));
+          const etag = `W/"check-r${mvp.getCheckRegistryVersion()}"`;
+          const cacheHeaders = { etag, 'cache-control': 'public, max-age=60, stale-while-revalidate=60', ...rateHeaders };
+          if (typeof req.headers['if-none-match'] === 'string' && req.headers['if-none-match'].includes(etag)) {
+            res.writeHead(304, checkHeaders(cacheHeaders));
+            return res.end();
+          }
+          return respondCheck(res, 200, body, checkHeaders(cacheHeaders), isHead);
+        } catch (error) {
+          if (error instanceof DomainError) {
+            return respondCheck(res, error.status, { error: error.code, message: error.message, disclaimer: DISCLAIMER }, checkHeaders(rateHeaders), isHead);
+          }
+          throw error;
+        }
       }
       if (pathname === '/v1/discord/reports' && req.method === 'POST') {
         if (!mvp || !discordBotToken) throw new DomainError(503, 'mvp_not_configured', 'Trusted Discord report adapter is not configured');
@@ -273,10 +385,16 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
       }
     })().catch((error) => {
       if (res.headersSent) return res.end();
+      // Ollie 2026-10-18 recheck: even unexpected errors on the check route
+      // must carry CORS headers and the disclaimer.
+      let isCheckRoute = false;
+      try { isCheckRoute = new URL(req.url, 'http://localhost').pathname === '/v1/check'; } catch { /* keep false */ }
       if (error instanceof DomainError) {
+        if (isCheckRoute) return respondCheck(res, error.status, { error: error.code, message: error.message, disclaimer: DISCLAIMER }, checkHeaders());
         return respond(res, error.status, { error: error.code, message: error.message });
       }
       console.error(error);
+      if (isCheckRoute) return respondCheck(res, 500, { error: 'internal_error', message: 'Internal server error', disclaimer: DISCLAIMER }, checkHeaders());
       return respond(res, 500, { error: 'internal_error', message: 'Internal server error' });
     });
   });
@@ -290,7 +408,7 @@ async function main() {
     id: process.env.REVIEWER_ID, token: process.env.REVIEWER_TOKEN,
     discordId: process.env.REVIEWER_DISCORD_ID,
   }];
-  const mvp = process.env.DISCORD_BOT_TOKEN ? createMvpService(store, { reviewers }) : null;
+  const mvp = process.env.DISCORD_BOT_TOKEN ? createMvpService(store, { reviewers, publicBaseUrl: process.env.PUBLIC_BASE_URL || null }) : null;
   const server = createApiServer({
     sentinel,
     reviewers,

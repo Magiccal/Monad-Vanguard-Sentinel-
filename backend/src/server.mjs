@@ -4,9 +4,10 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import { createSentinel, DomainError } from './core.mjs';
-import { createMvpService } from './mvp.mjs';
+import { createMvpService, DISCLAIMER } from './mvp.mjs';
 import { Store } from './store.mjs';
 import { createRpcClient, inspectTransactionEvidence, inspectWatchTarget } from './rpc.mjs';
+import { createRateLimiter } from './rate-limit.mjs';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -17,6 +18,35 @@ function respond(res, status, body) {
     'x-content-type-options': 'nosniff',
   });
   res.end(JSON.stringify(body));
+}
+
+// The check API is keyless and CORS-open so wallets, agents and web pages can
+// call it. 200 responses are cacheable for 60s; 4xx/5xx keep no-store.
+function checkHeaders(extra = {}) {
+  return {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET, OPTIONS',
+    'x-content-type-options': 'nosniff',
+    ...extra,
+  };
+}
+
+function respondCheck(res, status, body, headers = {}, head = false) {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    ...headers,
+  });
+  res.end(head ? undefined : JSON.stringify(body));
+}
+
+// Behind the hosted reverse proxy the direct socket address is the proxy, so
+// the first X-Forwarded-For hop is used when present. A spoofed XFF only
+// isolates the caller's own rate-limit bucket, so this is safe for a keyless
+// public endpoint; raw IPs are never persisted.
+function checkClientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim();
+  return req.socket?.remoteAddress ?? 'unknown';
 }
 
 async function respondStatic(res, pathname, mvpPage = false) {
@@ -80,6 +110,8 @@ async function readJson(req) {
 }
 
 export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers = null, discordBotToken = null, mvp = null, rpc = null }) {
+  // Issue #8: token bucket for the keyless check API — 60 req/min per IP, burst 20.
+  const checkLimiter = createRateLimiter({ limit: 60, windowMs: 60000, burst: 20 });
   const configuredReviewers = reviewers ?? [{ id: reviewerId, token: reviewerToken }];
   if (![1, 3].includes(configuredReviewers.length) || configuredReviewers.some((item) =>
     typeof item.id !== 'string' || item.id.trim().length < 2 || typeof item.token !== 'string' || item.token.length < 24) ||
@@ -110,6 +142,42 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
 
       if (req.method === 'GET' && pathname === '/health') {
         return respond(res, 200, { status: 'ok' });
+      }
+      // Issue #8 phase 1: keyless check API (read path). CORS-open so wallets,
+      // agents and pages can call it; 200s cache for 60s; 4xx/5xx stay no-store;
+      // the target is never fetched and no private data can leak (the registry
+      // is built from published incidents only).
+      if (mvp && segments[0] === 'v1' && segments[1] === 'check' && segments.length === 2 && ['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+        const isHead = req.method === 'HEAD';
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, checkHeaders());
+          return res.end();
+        }
+        const query = new URL(req.url, 'http://localhost').searchParams;
+        const gate = checkLimiter.take(checkClientIp(req));
+        const rateHeaders = {
+          'rate-limit-limit': '60',
+          'rate-limit-remaining': String(gate.remaining),
+          'rate-limit-reset': String(Math.ceil(Date.now() / 1000) + gate.resetSeconds),
+        };
+        if (!gate.ok) {
+          return respondCheck(res, 429, { error: 'rate_limited', message: 'Too many check requests; retry later.', disclaimer: DISCLAIMER }, checkHeaders({ ...rateHeaders, 'retry-after': String(gate.resetSeconds) }), isHead);
+        }
+        try {
+          const body = mvp.checkTarget({ target: query.get('target'), kind: query.get('kind') });
+          const etag = `W/"check-r${mvp.getCheckRegistryVersion()}"`;
+          const cacheHeaders = { etag, 'cache-control': 'public, max-age=60, stale-while-revalidate=60', ...rateHeaders };
+          if (typeof req.headers['if-none-match'] === 'string' && req.headers['if-none-match'].includes(etag)) {
+            res.writeHead(304, checkHeaders(cacheHeaders));
+            return res.end();
+          }
+          return respondCheck(res, 200, body, checkHeaders(cacheHeaders), isHead);
+        } catch (error) {
+          if (error instanceof DomainError) {
+            return respondCheck(res, error.status, { error: error.code, message: error.message, disclaimer: DISCLAIMER }, checkHeaders(rateHeaders), isHead);
+          }
+          throw error;
+        }
       }
       if (pathname === '/v1/discord/reports' && req.method === 'POST') {
         if (!mvp || !discordBotToken) throw new DomainError(503, 'mvp_not_configured', 'Trusted Discord report adapter is not configured');
@@ -290,7 +358,7 @@ async function main() {
     id: process.env.REVIEWER_ID, token: process.env.REVIEWER_TOKEN,
     discordId: process.env.REVIEWER_DISCORD_ID,
   }];
-  const mvp = process.env.DISCORD_BOT_TOKEN ? createMvpService(store, { reviewers }) : null;
+  const mvp = process.env.DISCORD_BOT_TOKEN ? createMvpService(store, { reviewers, publicBaseUrl: process.env.PUBLIC_BASE_URL || null }) : null;
   const server = createApiServer({
     sentinel,
     reviewers,

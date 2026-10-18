@@ -32,6 +32,8 @@ if (hasReports) {
     advice: ['Do not sign messages on lookalike portals.', 'Use the official project site only.'],
     reason: 'Escalating to under investigation so the community treats the lookalike portal with caution while we verify.',
     publicEvidenceIds: r1.evidence.map((item) => item.id),
+    // Reviewer-selected check indicators (issue #8). Never copied from the private targets.
+    indicators: [{ kind: 'domain', value: 'fictional-points-upgrade.example' }],
   });
 
   // R-0002 -> credible_threat (high): fictional Velunor fake claim site, matches the demo video and Metropolis write-up
@@ -50,6 +52,8 @@ if (hasReports) {
     advice: ['Do not connect your wallet to velunor-claim[.]xyz.', 'If you connected, revoke any approvals you gave the site now.', 'Only trust links posted in Velunor\'s official channels.'],
     reason: 'Publishing as a credible threat because the fake claim page actively requests wallet connections.',
     publicEvidenceIds: r2.evidence.map((item) => item.id),
+    // Reviewer-selected check indicators (issue #8). Never copied from the private targets.
+    indicators: [{ kind: 'domain', value: 'velunor-claim.xyz' }],
   });
 
   // R-0003 -> informational (published)

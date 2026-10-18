@@ -40,6 +40,7 @@
   };
   var render = function (incident) {
     var card = el('article', 'incident level-' + incident.level);
+    card.id = incident.id; // anchor target for /v1/check incidentUrl (#SEN-####)
     var top = el('div', 'card-top');
     var pills = el('div', 'pills');
     pills.append(el('span', 'pill id', incident.id));
@@ -89,6 +90,18 @@
       return;
     }
     incidents.forEach(function (incident) { section.append(render(incident)); });
+    // Scroll to and highlight an incident referenced via #SEN-#### (used by the
+    // check API's incidentUrl so agents can link straight to the warning).
+    var jump = function () {
+      var id = window.location.hash.slice(1);
+      if (!id) return;
+      var card = document.getElementById(id);
+      if (!card) return;
+      card.scrollIntoView();
+      card.classList.add('anchor-target');
+    };
+    if (window.location.hash) jump();
+    window.addEventListener('hashchange', jump);
   }).catch(function () {
     var loading = document.getElementById('loading');
     if (loading) loading.textContent = 'Could not load incidents. Try refreshing the page.';

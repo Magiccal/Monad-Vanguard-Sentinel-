@@ -1,0 +1,14 @@
+{
+  "target": { "input": "https://app.velunor-claim.xyz/claim", "kind": "url", "normalized": "https://app.velunor-claim.xyz/claim" },
+  "matched": true,
+  "level": "credible_threat",
+  "severity": "high",
+  "advice": ["Do not connect your wallet to velunor-claim[.]xyz.", "If you connected, revoke approvals now."],
+  "verifiedAt": "2026-10-12T14:01:00.000Z",
+  "incidentId": "SEN-0001",
+  "incidentUrl": "https://sentinel-security-demo.app.workbuddy.host/mvp.html#SEN-0001",
+  "matchedIndicator": { "kind": "domain", "value": "velunor-claim.xyz", "active": true },
+  "matches": [{ "incidentId": "SEN-0001", "level": "credible_threat", "severity": "high", "matchedIndicator": { "kind": "domain", "value": "velunor-claim.xyz", "active": true } }],
+  "checkedAt": "2026-10-18T09:30:00.000Z",
+  "disclaimer": "Independent community project · Not affiliated with Monad Foundation · Not financial advice"
+}

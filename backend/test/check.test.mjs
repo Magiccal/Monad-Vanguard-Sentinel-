@@ -6,6 +6,7 @@ import { createMvpService } from '../src/mvp.mjs';
 import { createSentinel } from '../src/core.mjs';
 import { createApiServer } from '../src/server.mjs';
 import { Store } from '../src/store.mjs';
+import { createRateLimiter } from '../src/rate-limit.mjs';
 import { normalizeDomainValue, normalizeUrlValue, normalizeCheckInput, matchCheckTarget, buildCheckRegistry } from '../src/check.mjs';
 
 const reviewer = { id: 'demo-reviewer', discordId: '100000000000000001', token: 'demo-reviewer-test-secret-token-123456' };
@@ -40,10 +41,10 @@ async function buildDemo({ indicator = { kind: 'domain', value: 'velunor-claim.x
   return { store, mvp };
 }
 
-function invoke(server, method, url, { headers = {} } = {}) {
+function invoke(server, method, url, { headers = {}, socket = null } = {}) {
   return new Promise((resolve) => {
     const req = Readable.from([]);
-    Object.assign(req, { method, url, headers });
+    Object.assign(req, { method, url, headers, socket: socket ?? { remoteAddress: null } });
     const res = {
       headersSent: false,
       writeHead(status, resHeaders) {
@@ -137,6 +138,9 @@ test('invalid check input returns 400 invalid_input with the disclaimer', async 
     `/v1/check?target=0x${'a'.repeat(39)}`,
     `/v1/check?target=0x${'a'.repeat(41)}`,
     `/v1/check?target=0x${'a'.repeat(63)}`,
+    '/v1/check?target=0xzzzz-not-hex',
+    `/v1/check?target=${'a'.repeat(40)}`,
+    `/v1/check?target=${'a'.repeat(64)}`,
     '/v1/check?target=javascript:alert(1)',
     `/v1/check?target=${encodeURIComponent('https://user:pass@example.com/x')}`,
     '/v1/check?target=example.com&kind=hologram',
@@ -169,8 +173,24 @@ test('closed incidents keep indicators inactive and return the closure advice', 
   assert.deepEqual(res.body.matchedIndicator, { kind: 'domain', value: 'velunor-claim.xyz', active: false });
 });
 
-test('a correction proposal without indicators removes them and the check returns none', async () => {
+test('a correction that omits indicators carries them over; an explicit [] removes them', async () => {
   const { store, mvp } = await buildDemo();
+  // Omitted field: the indicators (including matchSubdomains) carry over, so
+  // an active threat never silently loses its check warning.
+  await mvp.proposeFromIncident('SEN-0001', reviewer.id, {
+    level: 'under_investigation', severity: 'medium',
+    title: 'Fake Velunor ($VLN) claim site',
+    summary: 'DEMO CONTENT. The claim site investigation continues and the warning stays active.',
+    verificationNote: 'Correction reviewed by the demo reviewer without changing indicators.',
+    advice: ['Wait for reviewer guidance before interacting with this fictional site.'],
+    reason: 'Downgrading the level while keeping the published check indicators unchanged.',
+  });
+  let server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers: [reviewer] });
+  const carried = await invoke(server, 'GET', '/v1/check?target=app.velunor-claim.xyz');
+  assert.equal(carried.body.matched, true);
+  assert.equal(carried.body.level, 'under_investigation');
+  assert.deepEqual(carried.body.matchedIndicator, { kind: 'domain', value: 'velunor-claim.xyz', active: true });
+  // Explicit empty array: the reviewer deliberately removes the indicators.
   await mvp.proposeFromIncident('SEN-0001', reviewer.id, {
     level: 'informational', severity: null,
     title: 'Fictional Velunor demo downgraded',
@@ -178,11 +198,38 @@ test('a correction proposal without indicators removes them and the check return
     verificationNote: 'Correction reviewed by the demo reviewer.',
     advice: ['No action is required for this fictional demo.'],
     reason: 'Removing the indicator because the demonstration incident no longer needs a check warning.',
+    indicators: [],
+  });
+  server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers: [reviewer] });
+  const removed = await invoke(server, 'GET', '/v1/check?target=velunor-claim.xyz');
+  assert.equal(removed.body.matched, false);
+  assert.equal(removed.body.level, 'none');
+});
+
+test('a closed correction with an explicit empty indicator list removes them', async () => {
+  const { store, mvp } = await buildDemo();
+  await mvp.proposeFromIncident('SEN-0001', reviewer.id, {
+    level: 'false_alarm', severity: 'high',
+    title: 'Fake Velunor ($VLN) claim site',
+    summary: 'DEMO CONTENT. The reported claim site was confirmed fictional demo content and no real threat exists.',
+    verificationNote: 'Closure reviewed against the fictional demo evidence.',
+    advice: ['No action needed.'],
+    reason: 'Closing as a false alarm and deliberately removing the check indicator.',
+    indicators: [],
   });
   const server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers: [reviewer] });
   const res = await invoke(server, 'GET', '/v1/check?target=velunor-claim.xyz');
   assert.equal(res.body.matched, false);
   assert.equal(res.body.level, 'none');
+});
+
+test('matchSubdomains: false pins an indicator to exact matching', async () => {
+  const { store, mvp } = await buildDemo({ indicator: { kind: 'domain', value: 'velunor-claim.xyz', matchSubdomains: false } });
+  const server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers: [reviewer] });
+  const exact = await invoke(server, 'GET', '/v1/check?target=velunor-claim.xyz');
+  assert.equal(exact.body.matched, true);
+  const sub = await invoke(server, 'GET', '/v1/check?target=app.velunor-claim.xyz');
+  assert.equal(sub.body.matched, false);
 });
 
 test('shared-host and public-suffix domain indicators are rejected at proposal time', async () => {
@@ -192,7 +239,7 @@ test('shared-host and public-suffix domain indicators are rejected at proposal t
     incidentType: 'phishing', targets: [{ kind: 'url', value: 'https://evil.vercel.app/claim' }],
   }, '200000000000000003');
   const report = mvp.listReports(reviewer.id)[1];
-  for (const value of ['vercel.app', 'github.io', 'co.uk', 'xyz']) {
+  for (const value of ['vercel.app', 'github.io', 'appspot.com', 'eu.org', 'co.uk', 'xyz']) {
     await assert.rejects(() => mvp.proposeFromReport(report.id, reviewer.id, {
       level: 'under_investigation', severity: 'medium',
       title: 'Shared-host listing must be rejected', summary: 'DEMO CONTENT. This proposal must be rejected because of its invalid indicator value.',
@@ -265,8 +312,53 @@ test('rate limiting, caching, CORS, and OPTIONS preflight behave per the spec', 
   assert.ok(limited, 'expected a 429 within the burst window');
   assert.equal(limited.body.error, 'rate_limited');
   assert.equal(limited.body.disclaimer, DISCLAIMER);
-  assert.ok(Number(limited.headers['retry-after']) >= 0);
-  assert.ok(limited.headers['rate-limit-limit']);
+  const retry = Number(limited.headers['retry-after']);
+  assert.ok(Number.isInteger(retry) && retry >= 1 && retry <= 120, `retry-after must be whole seconds, got ${limited.headers['retry-after']}`);
+  const reset = Number(limited.headers['RateLimit-Reset']);
+  const nowSeconds = Math.ceil(Date.now() / 1000);
+  assert.ok(Number.isInteger(reset) && reset >= nowSeconds && reset <= nowSeconds + 120, `RateLimit-Reset must be epoch seconds within the window, got ${limited.headers['RateLimit-Reset']}`);
+  assert.ok(limited.headers['RateLimit-Limit']);
+  // 429 stays no-store.
+  assert.equal(limited.headers['cache-control'], 'no-store');
+});
+
+test('X-Forwarded-For is only honored from a trusted proxy socket', async () => {
+  const { store, mvp } = await buildDemo();
+  // TRUST_PROXY = 10.0.0.1: buckets key on the last XFF hop only when the
+  // socket peer is the trusted proxy.
+  const server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers: [reviewer], trustProxy: '10.0.0.1' });
+  const viaProxy = { socket: { remoteAddress: '10.0.0.1' } };
+  const direct = { socket: { remoteAddress: '198.51.100.7' } };
+  const honest = '9.9.9.9';
+  const spoofVariants = [`1.2.3.4, ${honest}`, `5.6.7.8, ${honest}`, `a.a.a.a, b.b.b.b, ${honest}`, honest];
+  let limited = 0;
+  for (let index = 0; index < 25; index += 1) {
+    const forwarded = spoofVariants[index % spoofVariants.length];
+    const res = await invoke(server, 'GET', '/v1/check?target=velunor-claim.xyz', { headers: { 'x-forwarded-for': forwarded }, ...viaProxy });
+    if (res.status === 429) limited += 1;
+  }
+  assert.ok(limited > 0, 'spoofed first hops behind the trusted proxy share one bucket');
+  // A direct (untrusted) socket keeps its own bucket: spoofed XFF cannot push
+  // another user into 429, and ignoring the header entirely protects them.
+  for (let index = 0; index < 19; index += 1) {
+    const res = await invoke(server, 'GET', '/v1/check?target=velunor-claim.xyz', { headers: { 'x-forwarded-for': `10.0.0.${index + 1}` }, ...direct });
+    assert.equal(res.status, 200, 'untrusted socket must not be rate-limited via spoofed XFF');
+  }
+});
+
+test('idle rate-limit buckets are evicted after the window and the map is capped', () => {
+  const limiter = createRateLimiter({ limit: 60, windowMs: 60000, burst: 20, maxBuckets: 3 });
+  assert.equal(limiter.take('a', 0).ok, true);
+  assert.equal(limiter.size(), 1);
+  // Advancing past the cleanup interval refills then evicts the idle bucket.
+  assert.equal(limiter.take('b', 121000).ok, true);
+  assert.equal(limiter.size(), 1, 'idle bucket must be evicted');
+  // Size cap: the next cleanup pass evicts idle buckets down to the cap.
+  limiter.take('c', 121500);
+  limiter.take('d', 122000);
+  limiter.take('e', 122500);
+  limiter.take('f', 243000); // past the cleanup interval → sweep runs
+  assert.ok(limiter.size() <= 3, 'bucket map must stay capped');
 });
 
 test('check responses contain no field absent from the public incident', async () => {
@@ -289,23 +381,6 @@ test('the bundled example matches the live response shape', async () => {
   assert.deepEqual(Object.keys(res.body).sort(), Object.keys(example).sort());
   assert.equal(res.body.incidentId, example.incidentId);
   assert.equal(res.body.level, example.level);
-});
-
-test('a spoofed X-Forwarded-For first hop cannot dodge the rate limit', async () => {
-  const { store, mvp } = await buildDemo();
-  const server = createApiServer({ sentinel: createSentinel(store), mvp, reviewers: [reviewer] });
-  // The hosting proxy appends the real client IP after any client-supplied
-  // hops, so buckets are keyed on the LAST hop: rotating spoofed values shares
-  // one bucket with the honest header.
-  const honest = '9.9.9.9';
-  const spoofVariants = [`1.2.3.4, ${honest}`, `5.6.7.8, ${honest}`, `a.a.a.a, b.b.b.b, ${honest}`, honest];
-  let limited = 0;
-  for (let index = 0; index < 25; index += 1) {
-    const forwarded = spoofVariants[index % spoofVariants.length];
-    const res = await invoke(server, 'GET', '/v1/check?target=velunor-claim.xyz', { headers: { 'x-forwarded-for': forwarded } });
-    if (res.status === 429) limited += 1;
-  }
-  assert.ok(limited > 0, 'spoofed header rotation must not bypass the shared bucket');
 });
 
 test('matchSubdomains is an opt-in per domain indicator with a safe default', async () => {

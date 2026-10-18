@@ -1,7 +1,5 @@
 // Read-only English public incidents page. Fetches GET /v1/mvp/incidents (no auth).
 // Mockup-aligned card layout. Uses only PublicIncident fields (no API change).
-// Optional: if a seed record includes a non-schema "target" string, it is shown
-// as a code-style Target line. Otherwise the line is omitted.
 (function () {
   'use strict';
   var el = function (tag, className, textContent) {
@@ -27,11 +25,21 @@
     }
   };
   var approvalLine = function (incident) {
+    // Ollie 2026-10-18: show the real approval counts, not a hardcoded 2 of 3.
+    var counts = function () {
+      if (!incident.approvalCount || !incident.requiredApprovals) return null;
+      return incident.approvalCount + ' of ' + incident.requiredApprovals;
+    };
     if (incident.level === 'credible_threat' || incident.level === 'confirmed_incident') {
-      return 'Approved by 2 of 3 reviewers';
+      var approved = counts();
+      return approved ? 'Approved by ' + approved + ' reviewers' : 'Approved by reviewers';
     }
     if (incident.level === 'false_alarm') {
-      return 'Closed as false alarm (2 of 3 reviewers)';
+      var closed = counts();
+      return closed ? 'Closed as false alarm (' + closed + ' reviewers)' : 'Closed as false alarm';
+    }
+    if (incident.level === 'resolved') {
+      return 'Closed as resolved';
     }
     if (incident.approvalMode === 'three_reviewer_quorum') {
       return 'Approved by reviewers';
@@ -52,12 +60,6 @@
     if (date) top.append(el('span', 'date', date));
     card.append(top);
     card.append(el('h3', null, incident.title));
-    if (incident.target) {
-      var target = el('p', 'target');
-      target.append(document.createTextNode('Target: '));
-      target.append(el('code', null, String(incident.target)));
-      card.append(target);
-    }
     if (incident.summary) card.append(el('p', 'summary', incident.summary));
     if (Array.isArray(incident.advice) && incident.advice.length) {
       card.append(el('p', 'advice-label', 'What you should do'));

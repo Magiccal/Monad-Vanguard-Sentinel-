@@ -33,25 +33,32 @@ function checkHeaders(extra = {}) {
 }
 
 function respondCheck(res, status, body, headers = {}, head = false) {
+  const isError = status >= 400;
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
+    // 4xx/5xx stay no-store; only 2xx/304 are cacheable.
+    ...(isError ? { 'cache-control': 'no-store' } : {}),
     ...headers,
   });
   res.end(head ? undefined : JSON.stringify(body));
 }
 
-// Ollie 2026-10-18: trust only the hop appended by the hosting proxy. Clients
-// can put arbitrary values in X-Forwarded-For, but the platform proxy appends
-// the real client address after them, so the LAST hop is the trustworthy one;
-// a spoofed first hop cannot dodge the limit because the bucket is keyed on
-// the proxy-appended value. Raw IPs are never persisted.
-function checkClientIp(req) {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.trim()) {
-    const hops = forwarded.split(',').map((hop) => hop.trim()).filter(Boolean);
-    if (hops.length) return hops[hops.length - 1];
+// Ollie 2026-10-18 (issue #9 review): X-Forwarded-For must only be trusted
+// when the direct socket peer is the configured trusted proxy. TRUST_PROXY
+// (or the trustProxy option) is a comma-separated proxy IP list, or "*" for
+// the hosted sandbox where every connection arrives through the platform
+// proxy. Otherwise the socket address is used, so a client cannot forge its
+// way into another user's bucket. Raw IPs are never persisted.
+function checkClientIp(req, trustProxy) {
+  const socketAddress = req.socket?.remoteAddress ?? 'unknown';
+  if (trustProxy.length && (trustProxy.includes('*') || trustProxy.includes(socketAddress))) {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.trim()) {
+      const hops = forwarded.split(',').map((hop) => hop.trim()).filter(Boolean);
+      if (hops.length) return hops[hops.length - 1];
+    }
   }
-  return req.socket?.remoteAddress ?? 'unknown';
+  return socketAddress;
 }
 
 async function respondStatic(res, pathname, mvpPage = false) {
@@ -114,11 +121,17 @@ async function readJson(req) {
   }
 }
 
-export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers = null, discordBotToken = null, mvp = null, rpc = null }) {
+export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers = null, discordBotToken = null, mvp = null, rpc = null, trustProxy = null }) {
   // Issue #8: token bucket for the keyless check API — 60 req/min per IP, burst 20.
   const checkLimiter = createRateLimiter({ limit: 60, windowMs: 60000, burst: 20 });
   // Salted 7-day abuse log; enabled only when CHECK_LOG_SALT is configured.
   const checkQueryLog = createQueryLog({ salt: process.env.CHECK_LOG_SALT || null });
+  // TRUST_PROXY: comma-separated trusted proxy IPs, or "*". Empty = never
+  // trust X-Forwarded-For (rate buckets key on the socket address).
+  const trustProxyList = typeof trustProxy === 'string'
+    ? trustProxy.split(',').map((item) => item.trim()).filter(Boolean)
+    : Array.isArray(trustProxy) ? trustProxy
+      : (process.env.TRUST_PROXY ?? '').split(',').map((item) => item.trim()).filter(Boolean);
   const configuredReviewers = reviewers ?? [{ id: reviewerId, token: reviewerToken }];
   if (![1, 3].includes(configuredReviewers.length) || configuredReviewers.some((item) =>
     typeof item.id !== 'string' || item.id.trim().length < 2 || typeof item.token !== 'string' || item.token.length < 24) ||
@@ -161,18 +174,18 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
           return res.end();
         }
         const query = new URL(req.url, 'http://localhost').searchParams;
-        const gate = checkLimiter.take(checkClientIp(req));
+        const gate = checkLimiter.take(checkClientIp(req, trustProxyList));
         const rateHeaders = {
-          'rate-limit-limit': '60',
-          'rate-limit-remaining': String(gate.remaining),
-          'rate-limit-reset': String(Math.ceil(Date.now() / 1000) + gate.resetSeconds),
+          'RateLimit-Limit': '60',
+          'RateLimit-Remaining': String(gate.remaining),
+          'RateLimit-Reset': String(Math.ceil(Date.now() / 1000) + gate.resetSeconds),
         };
         if (!gate.ok) {
           return respondCheck(res, 429, { error: 'rate_limited', message: 'Too many check requests; retry later.', disclaimer: DISCLAIMER }, checkHeaders({ ...rateHeaders, 'retry-after': String(gate.resetSeconds) }), isHead);
         }
         try {
           const body = mvp.checkTarget({ target: query.get('target'), kind: query.get('kind') });
-          checkQueryLog.record(body.target.normalized, checkClientIp(req));
+          checkQueryLog.record(body.target.normalized, checkClientIp(req, trustProxyList));
           const etag = `W/"check-r${mvp.getCheckRegistryVersion()}"`;
           const cacheHeaders = { etag, 'cache-control': 'public, max-age=60, stale-while-revalidate=60', ...rateHeaders };
           if (typeof req.headers['if-none-match'] === 'string' && req.headers['if-none-match'].includes(etag)) {

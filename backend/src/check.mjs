@@ -81,15 +81,15 @@ export function detectTargetKind(value) {
   return 'domain';
 }
 
-function hostOf(normalizedUrl) {
-  // normalized form is scheme//host[:port]/path — take authority up to the first "/".
-  return normalizedUrl.split('//')[1]?.split('/')[0].split('?')[0] ?? '';
-}
-
-function pathOf(normalizedUrl) {
-  const after = normalizedUrl.split('//')[1] ?? '';
-  const rest = after.slice(after.split('/')[0].length);
-  return rest.split('?')[0];
+function hostAndPathOf(normalizedUrl) {
+  // Parse with the URL API so "://" sequences and "//" inside paths cannot
+  // confuse string splitting.
+  try {
+    const url = new URL(normalizedUrl);
+    return { host: url.hostname, path: url.pathname === '/' ? '' : url.pathname };
+  } catch {
+    return { host: normalizedUrl, path: '' };
+  }
 }
 
 // Parse and validate the query input of GET /v1/check. Throws DomainError 400
@@ -106,6 +106,16 @@ export function normalizeCheckInput({ target, kind } = {}) {
   if (!CHECK_KINDS.includes(resolved)) {
     fail(400, 'invalid_input', 'kind must be domain, url, address, or transaction_hash');
   }
+  // Ollie 2026-10-18: malformed hex must be a 400, never a 200 "none" — any
+  // value starting with 0x that is not exactly 40/64 hex, and any bare 40/64
+  // hex without the 0x prefix, is rejected outright.
+  const trimmedTarget = target.trim();
+  if (/^0x/i.test(trimmedTarget) && !/^0x([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(trimmedTarget)) {
+    fail(400, 'invalid_input', '0x value must be a 40-hex address or 64-hex transaction hash');
+  }
+  if (/^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(trimmedTarget)) {
+    fail(400, 'invalid_input', 'hex values require the 0x prefix');
+  }
   let normalized = null;
   if (resolved === 'address') normalized = normalizeAddress(target);
   else if (resolved === 'transaction_hash') normalized = normalizeTransactionHash(target);
@@ -119,11 +129,13 @@ export function normalizeCheckInput({ target, kind } = {}) {
 
 // ---- Proposal-time indicator validation ----------------------------------
 
-// Reviewer-selected indicators on a publication proposal (max 10). Indicators
-// are never copied from the private report target: reviewers choose them
-// explicitly, and they pass the same quorum + Lead gate as the whole proposal.
+// Reviewer-selected indicators on a publication proposal (max 10). Returns
+// null when the field is omitted (meaning "carry the previous indicators
+// over") and an array when provided (an explicit empty array removes them).
+// Indicators are never copied from the private report target: reviewers
+// choose them explicitly, and they pass the same quorum + Lead gate.
 export function validateProposalIndicators(value) {
-  if (value === undefined || value === null) return [];
+  if (value === undefined || value === null) return null;
   if (!Array.isArray(value) || value.length > 10) {
     fail(400, 'invalid_input', 'indicators must contain at most 10 items');
   }
@@ -200,9 +212,10 @@ export function buildCheckRegistry(publicIncidents) {
       if (!CHECK_KINDS.includes(indicator.kind) || typeof indicator.value !== 'string') continue;
       const entry = { kind: indicator.kind, value: indicator.value, active: indicator.active ?? base.active, ...base };
       if (indicator.kind === 'domain') {
-        // Shared-host subdomains match exactly only, unless the reviewer
-        // explicitly opted into subdomain matching at proposal time.
-        const exactOnly = isSharedHostSubdomain(indicator.value) && indicator.matchSubdomains !== true;
+        // matchSubdomains: false forces exact matching on any domain; shared
+        // hosts (parent is a PSL entry) are exact-only unless opted in.
+        const exactOnly = indicator.matchSubdomains === false ||
+          (isSharedHostSubdomain(indicator.value) && indicator.matchSubdomains !== true);
         domain.push({ ...entry, exactOnly });
       } else if (indicator.kind === 'url') {
         url.push(entry);
@@ -223,11 +236,12 @@ function domainMatches(host, indicator) {
 }
 
 function urlMatches(normalizedUrl, indicator) {
-  if (hostOf(normalizedUrl) !== hostOf(indicator.value)) return false;
-  const checkedPath = pathOf(normalizedUrl);
-  const indicatorPath = pathOf(indicator.value);
+  const checked = hostAndPathOf(normalizedUrl);
+  const pinned = hostAndPathOf(indicator.value);
+  if (checked.host !== pinned.host) return false;
+  const indicatorPath = pinned.path;
   if (indicatorPath === '') return true;
-  return checkedPath === indicatorPath || checkedPath.startsWith(`${indicatorPath}/`);
+  return checked.path === indicatorPath || checked.path.startsWith(`${indicatorPath}/`);
 }
 
 function rank(entries) {
@@ -251,7 +265,7 @@ export function matchCheckTarget(registry, checked) {
     for (const indicator of registry.url) {
       if (urlMatches(checked.normalized, indicator)) hits.push(indicator);
     }
-    const host = hostOf(checked.normalized).split(':')[0];
+    const { host } = hostAndPathOf(checked.normalized);
     for (const indicator of registry.domain) {
       if (domainMatches(host, indicator)) hits.push({ ...indicator, kind: 'domain' });
     }

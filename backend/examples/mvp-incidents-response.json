@@ -31,7 +31,9 @@
         }
       ],
       "pendingLeadReview": false,
-      "approvalMode": "three_reviewer_quorum"
+      "approvalMode": "three_reviewer_quorum",
+      "approvalCount": 2,
+      "requiredApprovals": 2
     }
   ]
 }

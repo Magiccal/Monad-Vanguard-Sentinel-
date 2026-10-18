@@ -120,6 +120,8 @@ function publicIncident(incident) {
     version: incident.versions.length,
     pendingLeadReview: incident.pendingLeadReview === true,
     approvalMode: incident.approvalMode,
+    approvalCount: incident.approvalCount ?? 0,
+    requiredApprovals: incident.requiredApprovals ?? null,
     ...(incident.leadNotifiedAt ? { leadNotifiedAt: incident.leadNotifiedAt } : {}),
   };
 }
@@ -197,15 +199,22 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
     incident.verificationNote = proposal.verificationNote;
     incident.advice = proposal.advice;
     incident.publicEvidence = proposal.publicEvidence;
-    // Issue #8: the registry is rebuilt from published incidents. Closed
-    // incidents (resolved/false_alarm) keep their indicators with active:false
-    // so a check returns the closure instead of a stale warning. A correction
-    // proposal that omits indicators removes them entirely (check returns none).
+    // Issue #8: the registry is rebuilt from published incidents. Omitted
+    // indicators carry the previous set over (with matchSubdomains), an
+    // explicit [] removes them, and closed incidents (resolved/false_alarm)
+    // keep their indicators with active:false so a check returns the closure
+    // instead of a stale warning.
     const closed = ['resolved', 'false_alarm'].includes(proposal.level);
-    const indicatorSource = closed && proposal.indicators.length === 0 && incident.indicators?.length
-      ? incident.indicators.map(({ kind, value }) => ({ kind, value }))
+    const carriedOver = proposal.indicators === null || proposal.indicators === undefined;
+    const indicatorSource = carriedOver
+      ? (incident.indicators ?? []).map(({ kind, value, matchSubdomains }) => (
+        matchSubdomains === undefined ? { kind, value } : { kind, value, matchSubdomains }))
       : proposal.indicators;
     incident.indicators = indicatorSource.map((item) => ({ ...item, active: !closed }));
+    // Ollie 2026-10-18: the public page shows the real approval counts instead
+    // of a hardcoded "2 of 3".
+    incident.approvalCount = new Set(proposal.approvals.map((item) => item.reviewerId)).size;
+    incident.requiredApprovals = demo ? 1 : proposal.policy.count;
     // The check API's weak ETag is derived from this counter; a publication or
     // correction bumps it so cached results refresh (max-age=60).
     mvp.registryVersion = (mvp.registryVersion ?? 0) + 1;
@@ -273,7 +282,8 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
     }
     // Issue #8: reviewers explicitly select check indicators on the proposal
     // (max 10). They go through the same quorum + Lead gate and are never
-    // copied automatically from the private report targets.
+    // copied automatically from the private report targets. Omitted field =
+    // carry the previous indicators over; explicit [] removes them.
     const indicators = validateProposalIndicators(data.indicators);
     const summary = publicText(data.summary, 'what happened summary', 20, 2000, report.reporterDiscordId);
     if (summary.toLocaleLowerCase() === report.description.toLocaleLowerCase()) {

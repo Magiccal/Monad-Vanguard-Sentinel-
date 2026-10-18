@@ -4,7 +4,7 @@
 // for the demo deployment and avoids any persisted request metadata.
 const CLEANUP_INTERVAL_MS = 120000;
 
-export function createRateLimiter({ limit = 60, windowMs = 60000, burst = 20 } = {}) {
+export function createRateLimiter({ limit = 60, windowMs = 60000, burst = 20, maxBuckets = 10000 } = {}) {
   const refillPerMs = limit / windowMs;
   const buckets = new Map();
   let lastCleanup = 0;
@@ -12,7 +12,24 @@ export function createRateLimiter({ limit = 60, windowMs = 60000, burst = 20 } =
     if (atMs - lastCleanup < CLEANUP_INTERVAL_MS) return;
     lastCleanup = atMs;
     for (const [key, bucket] of buckets) {
-      if (atMs - bucket.at > windowMs && bucket.tokens >= burst) buckets.delete(key);
+      // Ollie 2026-10-18: refill before comparing so idle buckets actually
+      // drain back to full and get evicted; also cap the map size.
+      const refilled = Math.min(burst, bucket.tokens + (atMs - bucket.at) * refillPerMs);
+      if (atMs - bucket.at > windowMs && refilled >= burst - 1e-9) {
+        buckets.delete(key);
+      } else {
+        bucket.tokens = refilled;
+        bucket.at = atMs;
+      }
+    }
+    while (buckets.size > maxBuckets) {
+      let oldestKey = null;
+      let oldestAt = Infinity;
+      for (const [key, bucket] of buckets) {
+        if (bucket.at < oldestAt) { oldestAt = bucket.at; oldestKey = key; }
+      }
+      if (!oldestKey) break;
+      buckets.delete(oldestKey);
     }
   }
   return {
@@ -27,9 +44,19 @@ export function createRateLimiter({ limit = 60, windowMs = 60000, burst = 20 } =
       bucket.at = atMs;
       if (bucket.tokens >= 1) {
         bucket.tokens -= 1;
-        return { ok: true, remaining: Math.floor(bucket.tokens), resetSeconds: Math.ceil((burst - bucket.tokens) / refillPerMs) };
+        // Ollie 2026-10-18: reset/retry values are seconds, not ms.
+        return {
+          ok: true,
+          remaining: Math.floor(bucket.tokens),
+          resetSeconds: Math.max(1, Math.ceil((burst - bucket.tokens) / (refillPerMs * 1000))),
+        };
       }
-      return { ok: false, remaining: 0, resetSeconds: Math.ceil((1 - bucket.tokens) / refillPerMs) };
+      return {
+        ok: false,
+        remaining: 0,
+        resetSeconds: Math.max(1, Math.ceil((1 - bucket.tokens) / (refillPerMs * 1000))),
+      };
     },
+    size() { return buckets.size; },
   };
 }

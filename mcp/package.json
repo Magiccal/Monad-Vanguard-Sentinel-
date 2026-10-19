@@ -1,0 +1,19 @@
+{
+  "name": "sentinel-check-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "description": "MCP tool wrapping the Monad Vanguard Sentinel check API (issue #8 phase 2)",
+  "main": "src/index.mjs",
+  "scripts": {
+    "start": "node src/index.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.24.0"
+  }
+}

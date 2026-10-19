@@ -156,13 +156,42 @@ function approvalState(proposal, reviewerById, demo, rosterFingerprint, atMs) {
   return { ready: false, pendingLeadReview: false };
 }
 
-export function createMvpService(store, { now = () => new Date().toISOString(), reviewers, publicBaseUrl = null } = {}) {
+// Issue #8 phase 3: reputation for agent reporters, computed from triage
+// outcomes. Transparent formula: +3 per published report, -1 per report whose
+// latest proposal was rejected; floor 0. An agent with 2+ rejections and no
+// publication is throttled until a reviewer publishes one of its reports.
+export function agentReputation(data, agentId) {
+  const reports = data.reports.filter((report) => report.reporterAgentId === agentId);
+  const published = reports.filter((report) => report.incidentId && report.status === 'published').length;
+  const duplicates = reports.filter((report) => report.mergedInto).length;
+  const open = reports.filter((report) => !report.incidentId && !report.mergedInto).length;
+  const rejected = reports.filter((report) => !report.incidentId && !report.mergedInto
+    && data.proposals.some((proposal) => proposal.reportId === report.id && (proposal.rejections?.length ?? 0) > 0)).length;
+  const score = Math.max(0, published * 3 - rejected);
+  const throttled = rejected >= 2 && published === 0;
+  return { reports: reports.length, published, duplicates, open, rejected, score, throttled };
+}
+
+export function createMvpService(store, { now = () => new Date().toISOString(), reviewers, agents = [], publicBaseUrl = null } = {}) {
   if (!Array.isArray(reviewers) || ![1, 3].includes(reviewers.length)) throw new Error('MVP requires one demo reviewer or three individually authenticated reviewers');
   const reviewerById = new Map(reviewers.map((reviewer) => [reviewer.id, reviewer]));
   if (reviewerById.size !== reviewers.length || reviewers.some((reviewer) =>
     !reviewer.id || typeof reviewer.id !== 'string' || typeof reviewer.discordId !== 'string' || !/^\d{17,20}$/.test(reviewer.discordId)) ||
     new Set(reviewers.map((reviewer) => reviewer.discordId)).size !== reviewers.length) {
     throw new Error('MVP reviewers require distinct IDs and configured Discord snowflakes');
+  }
+  // Issue #8 phase 3: registered scout agents file reports through the trusted
+  // adapter with their own bearer tokens. Identity is server-side only — the
+  // agent never supplies its own id, and publication still requires the same
+  // human quorum as any other report.
+  if (!Array.isArray(agents)) throw new Error('agents must be an array');
+  const agentById = new Map(agents.map((agent) => [agent.id, agent]));
+  if (agentById.size !== agents.length || agents.some((agent) =>
+    !agent.id || typeof agent.id !== 'string' || !/^[a-z0-9_-]{2,64}$/i.test(agent.id) ||
+    typeof agent.name !== 'string' || agent.name.trim().length < 2 || agent.name.length > 100 ||
+    typeof agent.token !== 'string' || agent.token.length < 24) ||
+    new Set(agents.map((agent) => agent.token)).size !== agents.length) {
+    throw new Error('Agent reporters require distinct IDs (2-64 chars), display names (2-100 chars) and distinct bearer tokens of at least 24 characters');
   }
   const demo = reviewers.length === 1;
   if (!demo && (reviewers.some((reviewer) => typeof reviewer.isLead !== 'boolean') || reviewers.filter((reviewer) => reviewer.isLead).length !== 1)) {
@@ -345,6 +374,59 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
         .filter((report) => report.status === 'submitted' && !report.reviewerNotifiedAt)
         .map(({ id, createdAt }) => ({ id, createdAt })));
     },
+    // Issue #8 phase 3: scout agents file reports through the trusted adapter.
+    // Same private intake rules as Discord reports; identity comes from the
+    // authenticated agent, never from the payload. Low-reputation agents are
+    // throttled until a reviewer publishes one of their reports.
+    submitAgentReport(input, agentId) {
+      const agent = agentById.get(agentId);
+      if (!agent) fail(403, 'unknown_agent', 'Agent reporter is not configured');
+      const data = object(input, 'report');
+      if (data.reporterId !== undefined || data.reporterName !== undefined || data.reviewerId !== undefined || data.agentId !== undefined) fail(400, 'invalid_input', 'Reporter and reviewer identity is supplied by the trusted adapter');
+      const description = text(data.description, 'description', 1, 4000);
+      const projectId = optionalText(data.projectId, 'projectId', 100);
+      const incidentType = data.incidentType ?? 'not_sure';
+      if (!INCIDENT_TYPES.has(incidentType)) fail(400, 'invalid_input', 'Unknown incident type');
+      const targets = list(data.targets, 'targets', 10).map(target);
+      const evidenceItems = list(data.evidence, 'evidence', 10).map(evidence);
+      return store.update((state) => {
+        const mvp = mvpState(state);
+        const reputation = agentReputation(readMvp(state), agentId);
+        if (reputation.throttled) fail(429, 'agent_throttled', 'Too many unconfirmed reports from this agent; a reviewer must publish or clear them first');
+        const at = now();
+        const report = {
+          id: `R-${String(mvp.nextReportNumber++).padStart(4, '0')}`,
+          source: 'agent', reporterAgentId: agentId, reporterDiscordId: null,
+          description, projectId, incidentType,
+          targets, evidence: evidenceItems, status: 'submitted', incidentId: null,
+          mergedInto: null, createdAt: at, updatedAt: at, reviewerNotifiedAt: null,
+          history: [{ type: 'submitted', source: 'agent', agentId, at }],
+        };
+        mvp.reports.push(report);
+        return { id: report.id, status: report.status, createdAt: at, agentId };
+      });
+    },
+    listAgentReports(agentId) {
+      if (!agentById.has(agentId)) fail(403, 'unknown_agent', 'Agent reporter is not configured');
+      return store.read((state) => {
+        const data = readMvp(state);
+        return {
+          reports: data.reports
+            .filter((report) => report.reporterAgentId === agentId)
+            .map((report) => ({ id: report.id, status: report.status, incidentId: report.incidentId,
+              mergedInto: report.mergedInto, createdAt: report.createdAt, updatedAt: report.updatedAt })),
+          reputation: agentReputation(data, agentId),
+        };
+      });
+    },
+    agentProfile(agentId) {
+      const agent = agentById.get(agentId);
+      if (!agent) fail(403, 'unknown_agent', 'Agent reporter is not configured');
+      return store.read((state) => ({
+        agent: { id: agent.id, name: agent.name },
+        reputation: agentReputation(readMvp(state), agentId),
+      }));
+    },
     recordReviewerReportNotification(id) {
       return store.update((state) => {
         const report = find(mvpState(state).reports, id, 'Report');
@@ -352,7 +434,22 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
         return { id: report.id, reviewerNotifiedAt: report.reviewerNotifiedAt };
       });
     },
-    listReports(reviewerId) { actor(reviewerId); return store.read((state) => readMvp(state).reports); },
+    // Reviewer queue: agent reports carry the reporter's live reputation so
+    // reviewers can weigh the source; human reports are returned unchanged.
+    listReports(reviewerId) {
+      actor(reviewerId);
+      return store.read((state) => {
+        const data = readMvp(state);
+        const cache = new Map();
+        const reputationFor = (agentId) => {
+          if (!cache.has(agentId)) cache.set(agentId, agentReputation(data, agentId));
+          return cache.get(agentId);
+        };
+        return data.reports.map((report) => (report.reporterAgentId
+          ? { ...report, reporterReputation: reputationFor(report.reporterAgentId) }
+          : report));
+      });
+    },
     getReport(id, reviewerId) { actor(reviewerId); return store.read((state) => find(readMvp(state).reports, id, 'Report')); },
     triage(id, reviewerId, input = {}) {
       const reviewer = actor(reviewerId);

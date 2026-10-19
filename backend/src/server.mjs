@@ -178,7 +178,19 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
     throw new Error('Configure agent reporters with distinct IDs (2-64 chars), names (2-100 chars) and bearer tokens of at least 24 characters, distinct from reviewer and bot tokens');
   }
   const authenticatedReviewer = (req) => configuredReviewers.find((item) => authorized(req, item.token)) ?? null;
-  const authenticatedAgent = (req) => configuredAgents.find((item) => authorized(req, item.token)) ?? null;
+  // Ollie 2026-10-20 03:10 review: agent tokens are accepted ONLY via the
+  // standard Authorization bearer header — not the x-sentinel-token fallback —
+  // and a revoked agent (AGENTS_JSON revoked: true) is rejected outright.
+  const agentBearerOnly = (req) => {
+    const supplied = req.headers.authorization;
+    return typeof supplied === 'string' && supplied.startsWith('Bearer ') ? supplied.slice(7) : null;
+  };
+  const authenticatedAgentStrict = (req) => {
+    const token = agentBearerOnly(req);
+    const agent = token ? configuredAgents.find((item) => item.token === token) ?? null : null;
+    if (agent?.revoked) throw new DomainError(403, 'agent_revoked', 'This agent token has been revoked');
+    return agent;
+  };
 
   return http.createServer((req, res) => {
     (async () => {
@@ -246,21 +258,21 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
       // token identifies the registered agent; the payload never carries one.
       if (pathname === '/v1/agents/reports' && req.method === 'POST') {
         if (!mvp || !configuredAgents.length) throw new DomainError(503, 'agents_not_configured', 'Agent reporter intake is not configured');
-        const agent = authenticatedAgent(req);
-        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter bearer token required');
+        const agent = authenticatedAgentStrict(req);
+        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter bearer token required (Authorization: Bearer only)');
         const body = await readJson(req);
         return respond(res, 201, await mvp.submitAgentReport(body, agent.id));
       }
       if (pathname === '/v1/agents/reports' && req.method === 'GET') {
         if (!mvp || !configuredAgents.length) throw new DomainError(503, 'agents_not_configured', 'Agent reporter intake is not configured');
-        const agent = authenticatedAgent(req);
-        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter bearer token required');
+        const agent = authenticatedAgentStrict(req);
+        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter bearer token required (Authorization: Bearer only)');
         return respond(res, 200, mvp.listAgentReports(agent.id));
       }
       if (pathname === '/v1/agents/me' && req.method === 'GET') {
         if (!mvp || !configuredAgents.length) throw new DomainError(503, 'agents_not_configured', 'Agent reporter intake is not configured');
-        const agent = authenticatedAgent(req);
-        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter bearer token required');
+        const agent = authenticatedAgentStrict(req);
+        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter bearer token required (Authorization: Bearer only)');
         return respond(res, 200, mvp.agentProfile(agent.id));
       }
       if (pathname === '/v1/discord/reports/status' && req.method === 'POST') {
@@ -306,6 +318,7 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
             const id = segments[3];
             if (segments[4] === 'triage') return respond(res, 200, await mvp.triage(id, reviewer.id, await readJson(req)));
             if (segments[4] === 'merge') return respond(res, 200, await mvp.mergeDuplicate(id, reviewer.id, await readJson(req)));
+            if (segments[4] === 'dismiss') return respond(res, 200, await mvp.dismissReport(id, reviewer.id, await readJson(req)));
             if (segments[4] === 'publication') return respond(res, 200, await mvp.proposeFromReport(id, reviewer.id, await readJson(req)));
           }
         }

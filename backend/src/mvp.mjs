@@ -27,15 +27,22 @@ function text(value, label, min, max) {
   if (!normalized || normalized.length < min) fail(400, 'invalid_input', `${label} must contain ${min}-${max} characters`);
   return normalized;
 }
-function publicText(value, label, min, max, reporterDiscordId) {
+// Ollie 2026-10-20 03:10 review: the identity guard must only run on real
+// strings — agent reports have reporterDiscordId: null, and 'null'.includes
+// coercion made any proposal containing the word "null" fail as private_identity.
+// It now also blocks the agent's ID and display name from public text.
+function publicText(value, label, min, max, forbidden) {
   const normalized = text(value, label, min, max);
   if (/\b(?:https?:\/\/|www\.)/i.test(normalized)) fail(400, 'unsafe_public_text', `${label} must not embed a clickable URL; use approved evidence references`);
-  if (normalized.includes(reporterDiscordId)) fail(400, 'private_identity', `${label} must not expose the reporter's Discord ID`);
+  const identities = [forbidden].flat().filter((item) => typeof item === 'string' && item.length > 0);
+  if (identities.some((identity) => normalized.includes(identity))) {
+    fail(400, 'private_identity', `${label} must not expose the reporter's private identity`);
+  }
   return normalized;
 }
 // Ollie 2026-10-05 23:57: "What you should do" is 1-3 short action bullets, required
 // on every public level; false alarm always uses the single bullet "No action needed.".
-function adviceBullets(value, level, reporterDiscordId) {
+function adviceBullets(value, level, forbidden) {
   if (level === 'false_alarm') {
     const items = list(value, 'what-to-do advice', 3);
     if (items.length !== 1 || items[0] !== 'No action needed.') {
@@ -48,7 +55,7 @@ function adviceBullets(value, level, reporterDiscordId) {
   }
   const seen = new Set();
   return value.map((item) => {
-    const normalized = publicText(item, 'what-to-do advice', 10, 300, reporterDiscordId);
+    const normalized = publicText(item, 'what-to-do advice', 10, 300, forbidden);
     const key = normalized.toLocaleLowerCase();
     if (seen.has(key)) fail(400, 'invalid_input', 'what-to-do advice bullets must be distinct');
     seen.add(key);
@@ -160,16 +167,22 @@ function approvalState(proposal, reviewerById, demo, rosterFingerprint, atMs) {
 // outcomes. Transparent formula: +3 per published report, -1 per report whose
 // latest proposal was rejected; floor 0. An agent with 2+ rejections and no
 // publication is throttled until a reviewer publishes one of its reports.
+// Ollie 2026-10-20 03:10 review: dismissed reports and merged (duplicate)
+// reports count toward the negative factor, and the throttle is a ratio rule —
+// one publication no longer lifts it forever; negative must stay at least 3
+// below publications.
 export function agentReputation(data, agentId) {
   const reports = data.reports.filter((report) => report.reporterAgentId === agentId);
   const published = reports.filter((report) => report.incidentId && report.status === 'published').length;
   const duplicates = reports.filter((report) => report.mergedInto).length;
-  const open = reports.filter((report) => !report.incidentId && !report.mergedInto).length;
-  const rejected = reports.filter((report) => !report.incidentId && !report.mergedInto
+  const dismissed = reports.filter((report) => report.status === 'dismissed').length;
+  const open = reports.filter((report) => !report.incidentId && !report.mergedInto && report.status !== 'dismissed').length;
+  const rejected = reports.filter((report) => !report.incidentId && !report.mergedInto && report.status !== 'dismissed'
     && data.proposals.some((proposal) => proposal.reportId === report.id && (proposal.rejections?.length ?? 0) > 0)).length;
-  const score = Math.max(0, published * 3 - rejected);
-  const throttled = rejected >= 2 && published === 0;
-  return { reports: reports.length, published, duplicates, open, rejected, score, throttled };
+  const negative = rejected + dismissed + duplicates;
+  const score = Math.max(0, published * 3 - negative);
+  const throttled = negative >= published + 3;
+  return { reports: reports.length, published, duplicates, open, dismissed, rejected, score, throttled };
 }
 
 export function createMvpService(store, { now = () => new Date().toISOString(), reviewers, agents = [], publicBaseUrl = null } = {}) {
@@ -192,6 +205,11 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
     typeof agent.token !== 'string' || agent.token.length < 24) ||
     new Set(agents.map((agent) => agent.token)).size !== agents.length) {
     throw new Error('Agent reporters require distinct IDs (2-64 chars), display names (2-100 chars) and distinct bearer tokens of at least 24 characters');
+  }
+  function identityStrings(report) {
+    const agent = report.reporterAgentId ? agentById.get(report.reporterAgentId) : null;
+    return [report.reporterDiscordId, report.reporterAgentId, agent?.name]
+      .filter((value) => typeof value === 'string' && value.length > 0);
   }
   const demo = reviewers.length === 1;
   if (!demo && (reviewers.some((reviewer) => typeof reviewer.isLead !== 'boolean') || reviewers.filter((reviewer) => reviewer.isLead).length !== 1)) {
@@ -314,16 +332,16 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
     // copied automatically from the private report targets. Omitted field =
     // carry the previous indicators over; explicit [] removes them.
     const indicators = validateProposalIndicators(data.indicators);
-    const summary = publicText(data.summary, 'what happened summary', 20, 2000, report.reporterDiscordId);
+    const summary = publicText(data.summary, 'what happened summary', 20, 2000, identityStrings(report));
     if (summary.toLocaleLowerCase() === report.description.toLocaleLowerCase()) {
       fail(400, 'private_report_copy', 'Write a public summary instead of copying the private report description');
     }
     const proposal = {
       id: randomUUID(), reportId: report.id, incidentId: incident?.id ?? null,
-      level: data.level, severity, title: publicText(data.title, 'title', 10, 160, report.reporterDiscordId),
+      level: data.level, severity, title: publicText(data.title, 'title', 10, 160, identityStrings(report)),
       summary,
-      verificationNote: publicText(data.verificationNote, 'verification note', 20, 500, report.reporterDiscordId),
-      advice: adviceBullets(data.advice, data.level, report.reporterDiscordId),
+      verificationNote: publicText(data.verificationNote, 'verification note', 20, 500, identityStrings(report)),
+      advice: adviceBullets(data.advice, data.level, identityStrings(report)),
       reason: text(data.reason, 'reason', 20, 1000),
       publicEvidence,
       indicators,
@@ -391,8 +409,16 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
       const evidenceItems = list(data.evidence, 'evidence', 10).map(evidence);
       return store.update((state) => {
         const mvp = mvpState(state);
-        const reputation = agentReputation(readMvp(state), agentId);
-        if (reputation.throttled) fail(429, 'agent_throttled', 'Too many unconfirmed reports from this agent; a reviewer must publish or clear them first');
+        const data2 = readMvp(state);
+        const reputation = agentReputation(data2, agentId);
+        if (reputation.throttled) fail(429, 'agent_throttled', 'Too many negative outcomes for this agent; a reviewer must publish or clear its reports first');
+        // Ollie 2026-10-20 03:10 review: an agent could flood 300 reports in
+        // seconds. Per-agent caps: 10 reports per rolling hour, 20 open.
+        const agentReports = data2.reports.filter((report) => report.reporterAgentId === agentId);
+        const at0 = Date.parse(now());
+        const withinHour = agentReports.filter((report) => at0 - Date.parse(report.createdAt) < 3600000).length;
+        if (withinHour >= 10) fail(429, 'agent_rate_limited', 'Agent hourly report limit (10) reached; try again later');
+        if (reputation.open >= 20) fail(429, 'agent_open_cap', 'Agent has 20 open reports; reviewers must process them before more are accepted');
         const at = now();
         const report = {
           id: `R-${String(mvp.nextReportNumber++).padStart(4, '0')}`,
@@ -404,6 +430,26 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
         };
         mvp.reports.push(report);
         return { id: report.id, status: report.status, createdAt: at, agentId };
+      });
+    },
+    // Reviewer dismiss action (Ollie 2026-10-20 03:10 review): closes a spam or
+    // out-of-scope report with a reason; dismissed reports count against the
+    // agent's reputation so mass-filing cannot game the queue.
+    dismissReport(id, reviewerId, input) {
+      const reviewer = actor(reviewerId);
+      const dismissalReason = text(object(input, 'dismissal').reason, 'reason', 20, 1000);
+      return store.update((state) => {
+        const mvp = mvpState(state);
+        const report = find(mvp.reports, id, 'Report');
+        noSelfReview(report, reviewer);
+        if (report.incidentId || report.mergedInto || report.status === 'dismissed') {
+          fail(409, 'invalid_transition', 'Only open reports can be dismissed');
+        }
+        const at = now();
+        report.status = 'dismissed';
+        report.updatedAt = at;
+        report.history.push({ type: 'dismissed', actor: reviewer.id, at, reason: dismissalReason });
+        return { id: report.id, status: report.status, dismissedAt: at, reason: dismissalReason };
       });
     },
     listAgentReports(agentId) {

@@ -266,23 +266,33 @@ function reviewerNoticeChannel() {
 
 // A durable backend marker makes notification delivery idempotent across bot restarts.
 // The feed includes report IDs only; report text, reporter identity, and raw links stay private.
+// Ollie 2026-10-20 03:10 review: one summary message per batch (max 10) instead
+// of one ping per report; overflow reports stay unnotified and are picked up on
+// the next poll, which throttles the channel during agent floods.
 async function notifyReviewers() {
   if (!config.reviewerChannelId) return;
   const { reports } = await backend.unnotifiedReviewerReports();
-  for (const report of reports) {
-    if (reviewerNoticeInFlight.has(report.id)) continue;
-    reviewerNoticeInFlight.add(report.id);
-    try {
-      const channel = await reviewerNoticeChannel();
-      if (!channel?.isTextBased()) throw new Error('Configured reviewer channel is not text-based');
-      await channel.send({
-        content: `🆕 New private report: **${report.id}**. Use /sentinel open with report_id ${report.id} to review it.`,
-        allowedMentions: { parse: [] },
-      });
-      await backend.confirmReviewerReportNotification(report.id);
-    } finally {
-      reviewerNoticeInFlight.delete(report.id);
-    }
+  if (!reports.length) return;
+  const fresh = reports.filter((report) => !reviewerNoticeInFlight.has(report.id));
+  if (!fresh.length) return;
+  for (const report of fresh) reviewerNoticeInFlight.add(report.id);
+  try {
+    const channel = await reviewerNoticeChannel();
+    if (!channel?.isTextBased()) throw new Error('Configured reviewer channel is not text-based');
+    const batch = fresh.slice(0, 10);
+    const lines = batch.map((report) => `- **${report.id}** — use /sentinel open with report_id ${report.id}`);
+    const overflow = fresh.length - batch.length;
+    const content = [
+      fresh.length === 1 ? '🆕 New private report:' : `🆕 ${fresh.length} new private reports:`,
+      ...lines,
+      ...(overflow > 0 ? [`…and ${overflow} more (next poll).`] : []),
+      '',
+      'Submitted via the trusted adapter; nothing is public until reviewers approve.',
+    ].join('\n');
+    await channel.send({ content, allowedMentions: { parse: [] } });
+    for (const report of batch) await backend.confirmReviewerReportNotification(report.id);
+  } finally {
+    for (const report of fresh) reviewerNoticeInFlight.delete(report.id);
   }
 }
 

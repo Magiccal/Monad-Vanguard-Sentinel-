@@ -143,7 +143,7 @@ async function readJson(req) {
   }
 }
 
-export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers = null, discordBotToken = null, mvp = null, rpc = null, trustProxy = null }) {
+export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers = null, agents = [], discordBotToken = null, mvp = null, rpc = null, trustProxy = null }) {
   // Issue #8: token bucket for the keyless check API — 60 req/min per IP, burst 20.
   const checkLimiter = createRateLimiter({ limit: 60, windowMs: 60000, burst: 20 });
   // Salted 7-day abuse log; enabled only when CHECK_LOG_SALT is configured.
@@ -165,7 +165,32 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
   if (discordBotToken !== null && (typeof discordBotToken !== 'string' || discordBotToken.length < 24 || configuredReviewers.some((item) => item.token === discordBotToken))) {
     throw new Error('DISCORD_BOT_TOKEN must be at least 24 characters and distinct from reviewer tokens');
   }
+  // Issue #8 phase 3: registered scout agents with their own bearer tokens.
+  // Empty list = agent intake disabled (routes answer 503 agents_not_configured).
+  const configuredAgents = Array.isArray(agents) ? agents : [];
+  if (configuredAgents.some((agent) =>
+    !agent.id || typeof agent.id !== 'string' || !/^[a-z0-9_-]{2,64}$/i.test(agent.id) ||
+    typeof agent.name !== 'string' || agent.name.trim().length < 2 || agent.name.length > 100 ||
+    typeof agent.token !== 'string' || agent.token.length < 24) ||
+    new Set(configuredAgents.map((agent) => agent.token)).size !== configuredAgents.length ||
+    configuredAgents.some((agent) => configuredReviewers.some((item) => item.token === agent.token)) ||
+    (discordBotToken !== null && configuredAgents.some((agent) => agent.token === discordBotToken))) {
+    throw new Error('Configure agent reporters with distinct IDs (2-64 chars), names (2-100 chars) and bearer tokens of at least 24 characters, distinct from reviewer and bot tokens');
+  }
   const authenticatedReviewer = (req) => configuredReviewers.find((item) => authorized(req, item.token)) ?? null;
+  // Ollie 2026-10-20 03:10 review: agent tokens are accepted ONLY via the
+  // standard Authorization bearer header — not the x-sentinel-token fallback —
+  // and a revoked agent (AGENTS_JSON revoked: true) is rejected outright.
+  const agentBearerOnly = (req) => {
+    const supplied = req.headers.authorization;
+    return typeof supplied === 'string' && supplied.startsWith('Bearer ') ? supplied.slice(7) : null;
+  };
+  const authenticatedAgentStrict = (req) => {
+    const token = agentBearerOnly(req);
+    const agent = token ? configuredAgents.find((item) => item.token === token) ?? null : null;
+    if (agent?.revoked) throw new DomainError(403, 'agent_revoked', 'This agent token has been revoked');
+    return agent;
+  };
 
   return http.createServer((req, res) => {
     (async () => {
@@ -229,6 +254,27 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
         const body = await readJson(req);
         return respond(res, 201, await mvp.submitDiscord(body, body.discordUserId));
       }
+      // Issue #8 phase 3: scout-agent report intake and reputation. Bearer
+      // token identifies the registered agent; the payload never carries one.
+      if (pathname === '/v1/agents/reports' && req.method === 'POST') {
+        if (!mvp || !configuredAgents.length) throw new DomainError(503, 'agents_not_configured', 'Agent reporter intake is not configured');
+        const agent = authenticatedAgentStrict(req);
+        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter bearer token required (Authorization: Bearer only)');
+        const body = await readJson(req);
+        return respond(res, 201, await mvp.submitAgentReport(body, agent.id));
+      }
+      if (pathname === '/v1/agents/reports' && req.method === 'GET') {
+        if (!mvp || !configuredAgents.length) throw new DomainError(503, 'agents_not_configured', 'Agent reporter intake is not configured');
+        const agent = authenticatedAgentStrict(req);
+        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter bearer token required (Authorization: Bearer only)');
+        return respond(res, 200, mvp.listAgentReports(agent.id));
+      }
+      if (pathname === '/v1/agents/me' && req.method === 'GET') {
+        if (!mvp || !configuredAgents.length) throw new DomainError(503, 'agents_not_configured', 'Agent reporter intake is not configured');
+        const agent = authenticatedAgentStrict(req);
+        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter bearer token required (Authorization: Bearer only)');
+        return respond(res, 200, mvp.agentProfile(agent.id));
+      }
       if (pathname === '/v1/discord/reports/status' && req.method === 'POST') {
         if (!mvp || !discordBotToken) throw new DomainError(503, 'mvp_not_configured', 'Trusted Discord report adapter is not configured');
         if (!authorized(req, discordBotToken)) throw new DomainError(401, 'unauthorized', 'Discord adapter bearer token required');
@@ -272,6 +318,7 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
             const id = segments[3];
             if (segments[4] === 'triage') return respond(res, 200, await mvp.triage(id, reviewer.id, await readJson(req)));
             if (segments[4] === 'merge') return respond(res, 200, await mvp.mergeDuplicate(id, reviewer.id, await readJson(req)));
+            if (segments[4] === 'dismiss') return respond(res, 200, await mvp.dismissReport(id, reviewer.id, await readJson(req)));
             if (segments[4] === 'publication') return respond(res, 200, await mvp.proposeFromReport(id, reviewer.id, await readJson(req)));
           }
         }
@@ -408,10 +455,12 @@ async function main() {
     id: process.env.REVIEWER_ID, token: process.env.REVIEWER_TOKEN,
     discordId: process.env.REVIEWER_DISCORD_ID,
   }];
-  const mvp = process.env.DISCORD_BOT_TOKEN ? createMvpService(store, { reviewers, publicBaseUrl: process.env.PUBLIC_BASE_URL || null }) : null;
+  const agents = process.env.AGENTS_JSON ? JSON.parse(process.env.AGENTS_JSON) : [];
+  const mvp = process.env.DISCORD_BOT_TOKEN ? createMvpService(store, { reviewers, agents, publicBaseUrl: process.env.PUBLIC_BASE_URL || null }) : null;
   const server = createApiServer({
     sentinel,
     reviewers,
+    agents,
     discordBotToken: process.env.DISCORD_BOT_TOKEN ?? null,
     mvp,
     rpc: process.env.RPC_URL ? createRpcClient(process.env.RPC_URL) : null,

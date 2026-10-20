@@ -383,6 +383,30 @@ test('AGENT_TOKEN_HEADER_FALLBACK=true accepts the fallback header on agent rout
   assert.equal((await invoke(server, 'POST', '/v1/agents/reports', report, 'wrong-token-wrong-token-wrong-token')).status, 401);
 });
 
+test('fallback-header authentications are logged without the token; Bearer authentications are not', async () => {
+  const { server } = await buildServer({ agentHeaderFallback: true });
+  const lines = [];
+  const original = console.log;
+  console.log = (...args) => lines.push(args.join(' '));
+  try {
+    const filed = await invoke(server, 'POST', '/v1/agents/reports', { description: 'A fictional report filed through the logged fallback.' }, null, { 'x-sentinel-token': agents[0].token });
+    assert.equal(filed.status, 201);
+    const viaBearer = await invoke(server, 'POST', '/v1/agents/reports', { description: 'A fictional report filed through the bearer path.' }, agents[0].token);
+    assert.equal(viaBearer.status, 201);
+    // A Bearer that matches no agent and no fallback header: no log, plain 401.
+    assert.equal((await invoke(server, 'POST', '/v1/agents/reports', { description: 'A fictional report from an unknown token here.' }, 'wrong-token-wrong-token-wrong-token')).status, 401);
+  } finally {
+    console.log = original;
+  }
+  const fallbackLines = lines.filter((line) => line.includes('agent-fallback-auth'));
+  assert.equal(fallbackLines.length, 1);
+  assert.ok(fallbackLines[0].includes('agent=scout-01'), fallbackLines[0]);
+  assert.ok(fallbackLines[0].includes('route=POST /v1/agents/reports'), fallbackLines[0]);
+  for (const agent of agents) {
+    assert.equal(fallbackLines[0].includes(agent.token), false);
+  }
+});
+
 test('the flag file enables the fallback while the env var is unset (hosted sandbox workaround)', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'sentinel-flag-'));
   const flagFile = join(dir, 'agent-header-fallback.flag');

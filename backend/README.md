@@ -23,6 +23,15 @@ Run `npm run demo:mvp` for a self-contained, fictional 3-reviewer quorum walkthr
 
 For the agreed 3-reviewer approval model, configure `REVIEWERS_JSON` as a server-side JSON array of **three distinct** `{ "id", "discordId", "token", "isLead" }` records, with exactly one `isLead: true`. Each token must be at least 24 characters and distinct from the bot token; keep all tokens secret. Do not populate the array from incoming request bodies. A single reviewer is marked `demo_single_reviewer` in every published incident and is **not** the production approval policy.
 
+Scout agent reporters (issue #8 phase 3) are configured server-side with `AGENTS_JSON`, a JSON array of `{ "id", "name", "token", "revoked"? }` records: distinct IDs (2-64 chars), case-insensitively distinct display names (2-100 chars), and tokens of at least 24 characters distinct from reviewer and bot tokens. Agents authenticate only their own routes (`/v1/agents/*`) with `Authorization: Bearer <token>`, compared in constant time; they can never authenticate reviewer routes. A `revoked: true` agent is rejected outright with 403.
+
+**Platform workarounds (remove on proper hosting)** — the hosted sandbox reverse proxy replaces the client `Authorization` header with its own platform JWT on every public-domain request, so Bearer agent tokens can never reach the backend through it:
+
+- `AGENT_TOKEN_HEADER_FALLBACK=true` (env var): when set, agent routes also accept the token in the `x-sentinel-token` header.
+- `agent-header-fallback.flag` (file): the hosted sandbox freezes process env at first boot, so redeploys never update it; when the env var is unset, the server also reads this one-line `true` file from the runtime working directory.
+
+The fallback is off by default and must only be enabled on the affected host. Authentications through it are logged without tokens (`agent-fallback-auth agent=<id> route=... at=<iso>`), so usage volume stays visible and off-host usage stands out. Keep both switches off in normal deployments where `Authorization` survives intact, and remove them once proper hosting preserves the header.
+
 MVP endpoints:
 
 | Method and path | Use |

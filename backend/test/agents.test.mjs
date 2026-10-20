@@ -365,13 +365,22 @@ test('AGENT_TOKEN_HEADER_FALLBACK=true accepts the fallback header on agent rout
   assert.equal((await invoke(server, 'GET', '/v1/agents/me', undefined, null, { 'x-sentinel-token': agents[0].token })).status, 200);
   // But never on reviewer routes, even with the flag on.
   assert.equal((await invoke(server, 'GET', '/v1/mvp/reports', undefined, null, { 'x-sentinel-token': agents[0].token })).status, 401);
-  // Both headers: Bearer wins and the fallback is ignored — never both tried.
+  // Both headers: Bearer wins when it authenticates a known agent — a
+  // different agent's fallback token cannot shadow the Bearer identity.
   const both = await invoke(server, 'POST', '/v1/agents/reports', report, agents[0].token, { 'x-sentinel-token': agents[1].token });
   assert.equal(both.status, 201);
   assert.equal(both.body.agentId, 'scout-01');
-  // An invalid Bearer is not rescued by a valid fallback header.
-  assert.equal((await invoke(server, 'POST', '/v1/agents/reports', report, 'wrong-token-wrong-token-wrong-token', { 'x-sentinel-token': agents[0].token })).status, 401);
-  assert.equal((await invoke(server, 'POST', '/v1/agents/reports', report, 'Basic not-a-bearer-value-here-12345', { 'x-sentinel-token': agents[0].token })).status, 401);
+  // A Bearer value that matches no agent (garbage, or the platform JWT the
+  // hosted proxy injects) does not block the fallback header: the request
+  // authenticates as the agent owning the fallback token.
+  const mangledBearer = await invoke(server, 'POST', '/v1/agents/reports', report, 'wrong-token-wrong-token-wrong-token', { 'x-sentinel-token': agents[0].token });
+  assert.equal(mangledBearer.status, 201);
+  assert.equal(mangledBearer.body.agentId, 'scout-01');
+  const foreignScheme = await invoke(server, 'POST', '/v1/agents/reports', report, 'Basic not-a-bearer-value-here-12345', { 'x-sentinel-token': agents[0].token });
+  assert.equal(foreignScheme.status, 201);
+  assert.equal(foreignScheme.body.agentId, 'scout-01');
+  // No matching header at all still fails.
+  assert.equal((await invoke(server, 'POST', '/v1/agents/reports', report, 'wrong-token-wrong-token-wrong-token')).status, 401);
 });
 
 test('the flag file enables the fallback while the env var is unset (hosted sandbox workaround)', async () => {

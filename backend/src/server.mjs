@@ -143,7 +143,7 @@ async function readJson(req) {
   }
 }
 
-export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers = null, agents = [], discordBotToken = null, mvp = null, rpc = null, trustProxy = null }) {
+export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers = null, agents = [], discordBotToken = null, mvp = null, rpc = null, trustProxy = null, agentHeaderFallback = null }) {
   // Issue #8: token bucket for the keyless check API — 60 req/min per IP, burst 20.
   const checkLimiter = createRateLimiter({ limit: 60, windowMs: 60000, burst: 20 });
   // Salted 7-day abuse log; enabled only when CHECK_LOG_SALT is configured.
@@ -179,23 +179,45 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
     throw new Error('Configure agent reporters with distinct IDs (2-64 chars), case-insensitively distinct names (2-100 chars) and bearer tokens of at least 24 characters, distinct from reviewer and bot tokens');
   }
   const authenticatedReviewer = (req) => configuredReviewers.find((item) => authorized(req, item.token)) ?? null;
-  // Ollie 2026-10-20 03:10 review: agent tokens are accepted ONLY via the
-  // standard Authorization bearer header — not the x-sentinel-token fallback —
-  // and a revoked agent (AGENTS_JSON revoked: true) is rejected outright.
-  const agentBearerOnly = (req) => {
+  // Ollie 2026-10-20 18:43 review: agent tokens are compared in constant time
+  // (same as reviewer tokens) and a revoked agent (AGENTS_JSON revoked: true)
+  // is rejected outright with 403.
+  // PLATFORM WORKAROUND (remove on proper hosting): the hosted sandbox reverse
+  // proxy rewrites the Authorization header value (observed 2026-10-08 and
+  // 2026-10-20), so agent intake behind that proxy only works when the agent
+  // sends the token in the x-sentinel-token fallback header instead. The
+  // fallback is OFF by default and enabled only on the affected host via
+  // AGENT_TOKEN_HEADER_FALLBACK=true. If a request carries an Authorization
+  // header, Bearer wins and the fallback is ignored — the two are never both
+  // tried, so a valid fallback can never rescue an invalid Bearer value.
+  // `agentHeaderFallback` overrides the env flag (tests); default reads the
+  // AGENT_TOKEN_HEADER_FALLBACK environment variable.
+  const fallbackSetting = agentHeaderFallback ?? process.env.AGENT_TOKEN_HEADER_FALLBACK;
+  const agentFallbackEnabled = fallbackSetting === true || fallbackSetting === 'true';
+  const agentTokenCandidates = (req) => {
+    const candidates = [];
     const supplied = req.headers.authorization;
-    return typeof supplied === 'string' && supplied.startsWith('Bearer ') ? supplied.slice(7) : null;
+    if (typeof supplied === 'string') {
+      if (supplied.startsWith('Bearer ')) candidates.push(supplied.slice(7));
+      return candidates; // any Authorization header present: ignore the fallback
+    }
+    if (agentFallbackEnabled) {
+      const fallback = req.headers['x-sentinel-token'];
+      if (typeof fallback === 'string') candidates.push(fallback);
+    }
+    return candidates;
   };
   const authenticatedAgentStrict = (req) => {
-    const token = agentBearerOnly(req);
-    if (token === null) return null;
-    // Ollie 2026-10-20 follow-up: compare agent tokens in constant time like
-    // reviewer tokens — the plain === comparison undid the earlier hardening.
-    const expected = Buffer.from(token);
-    const agent = configuredAgents.find((item) => {
-      const candidate = Buffer.from(item.token);
-      return candidate.length === expected.length && timingSafeEqual(candidate, expected);
-    }) ?? null;
+    const tokens = agentTokenCandidates(req);
+    if (!tokens.length) return null;
+    // Compare agent tokens in constant time like reviewer tokens.
+    const agent = tokens.map((token) => {
+      const expected = Buffer.from(token);
+      return configuredAgents.find((item) => {
+        const candidate = Buffer.from(item.token);
+        return candidate.length === expected.length && timingSafeEqual(candidate, expected);
+      }) ?? null;
+    }).find(Boolean) ?? null;
     if (agent?.revoked) throw new DomainError(403, 'agent_revoked', 'This agent token has been revoked');
     return agent;
   };
@@ -267,20 +289,20 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
       if (pathname === '/v1/agents/reports' && req.method === 'POST') {
         if (!mvp || !configuredAgents.length) throw new DomainError(503, 'agents_not_configured', 'Agent reporter intake is not configured');
         const agent = authenticatedAgentStrict(req);
-        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter bearer token required (Authorization: Bearer only)');
+        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter token required (Authorization: Bearer, or x-sentinel-token when AGENT_TOKEN_HEADER_FALLBACK=true)');
         const body = await readJson(req);
         return respond(res, 201, await mvp.submitAgentReport(body, agent.id));
       }
       if (pathname === '/v1/agents/reports' && req.method === 'GET') {
         if (!mvp || !configuredAgents.length) throw new DomainError(503, 'agents_not_configured', 'Agent reporter intake is not configured');
         const agent = authenticatedAgentStrict(req);
-        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter bearer token required (Authorization: Bearer only)');
+        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter token required (Authorization: Bearer, or x-sentinel-token when AGENT_TOKEN_HEADER_FALLBACK=true)');
         return respond(res, 200, mvp.listAgentReports(agent.id));
       }
       if (pathname === '/v1/agents/me' && req.method === 'GET') {
         if (!mvp || !configuredAgents.length) throw new DomainError(503, 'agents_not_configured', 'Agent reporter intake is not configured');
         const agent = authenticatedAgentStrict(req);
-        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter bearer token required (Authorization: Bearer only)');
+        if (!agent) throw new DomainError(401, 'unauthorized', 'Agent reporter token required (Authorization: Bearer, or x-sentinel-token when AGENT_TOKEN_HEADER_FALLBACK=true)');
         return respond(res, 200, mvp.agentProfile(agent.id));
       }
       if (pathname === '/v1/discord/reports/status' && req.method === 'POST') {

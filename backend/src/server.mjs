@@ -4,6 +4,7 @@ import { BlockList, isIP } from 'node:net';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { createSentinel, DomainError } from './core.mjs';
 import { createMvpService, DISCLAIMER } from './mvp.mjs';
 import { Store } from './store.mjs';
@@ -143,7 +144,7 @@ async function readJson(req) {
   }
 }
 
-export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers = null, agents = [], discordBotToken = null, mvp = null, rpc = null, trustProxy = null, agentHeaderFallback = null }) {
+export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers = null, agents = [], discordBotToken = null, mvp = null, rpc = null, trustProxy = null, agentHeaderFallback = null, agentHeaderFallbackFile = null }) {
   // Issue #8: token bucket for the keyless check API — 60 req/min per IP, burst 20.
   const checkLimiter = createRateLimiter({ limit: 60, windowMs: 60000, burst: 20 });
   // Salted 7-day abuse log; enabled only when CHECK_LOG_SALT is configured.
@@ -187,12 +188,27 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
   // 2026-10-20), so agent intake behind that proxy only works when the agent
   // sends the token in the x-sentinel-token fallback header instead. The
   // fallback is OFF by default and enabled only on the affected host via
-  // AGENT_TOKEN_HEADER_FALLBACK=true. If a request carries an Authorization
-  // header, Bearer wins and the fallback is ignored — the two are never both
-  // tried, so a valid fallback can never rescue an invalid Bearer value.
-  // `agentHeaderFallback` overrides the env flag (tests); default reads the
-  // AGENT_TOKEN_HEADER_FALLBACK environment variable.
-  const fallbackSetting = agentHeaderFallback ?? process.env.AGENT_TOKEN_HEADER_FALLBACK;
+  // AGENT_TOKEN_HEADER_FALLBACK=true. The hosted sandbox freezes process env
+  // at first boot (observed 2026-10-20: redeploys update files but never the
+  // running process env), so the affected host may alternatively drop a
+  // one-line "true" file named agent-header-fallback.flag into the runtime
+  // working directory; the env flag stays the primary switch and the file is
+  // only read when the env var is unset. Remove both on proper hosting.
+  // If a request carries an Authorization header, Bearer wins and the
+  // fallback is ignored — the two are never both tried, so a valid fallback
+  // can never rescue an invalid Bearer value.
+  // `agentHeaderFallback` / `agentHeaderFallbackFile` override the env flag
+  // and flag-file path (tests); defaults read the environment / cwd.
+  const readFallbackFlagFile = (filePath) => {
+    try {
+      return readFileSync(filePath, 'utf8').trim().toLowerCase() === 'true' ? 'true' : 'false';
+    } catch {
+      return null; // no flag file: env (or the off default) decides
+    }
+  };
+  const fallbackSetting = agentHeaderFallback
+    ?? process.env.AGENT_TOKEN_HEADER_FALLBACK
+    ?? readFallbackFlagFile(agentHeaderFallbackFile ?? 'agent-header-fallback.flag');
   const agentFallbackEnabled = fallbackSetting === true || fallbackSetting === 'true';
   const agentTokenCandidates = (req) => {
     const candidates = [];

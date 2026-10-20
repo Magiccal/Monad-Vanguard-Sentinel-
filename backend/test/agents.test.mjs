@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createMvpService } from '../src/mvp.mjs';
 import { createSentinel } from '../src/core.mjs';
 import { createApiServer } from '../src/server.mjs';
@@ -44,13 +47,14 @@ function invoke(server, method, url, body, token, extraHeaders = {}) {
   });
 }
 
-async function buildServer({ withAgents = true, agentConfig = agents, agentHeaderFallback = null } = {}) {
+async function buildServer({ withAgents = true, agentConfig = agents, agentHeaderFallback = null, agentHeaderFallbackFile = null } = {}) {
   const store = await Store.open();
   const mvp = createMvpService(store, { reviewers, agents: withAgents ? agentConfig : [] });
   const server = createApiServer({
     sentinel: createSentinel(store), mvp, reviewers,
     agents: withAgents ? agentConfig : [], discordBotToken: botToken,
     agentHeaderFallback,
+    agentHeaderFallbackFile,
   });
   return { store, mvp, server };
 }
@@ -368,6 +372,29 @@ test('AGENT_TOKEN_HEADER_FALLBACK=true accepts the fallback header on agent rout
   // An invalid Bearer is not rescued by a valid fallback header.
   assert.equal((await invoke(server, 'POST', '/v1/agents/reports', report, 'wrong-token-wrong-token-wrong-token', { 'x-sentinel-token': agents[0].token })).status, 401);
   assert.equal((await invoke(server, 'POST', '/v1/agents/reports', report, 'Basic not-a-bearer-value-here-12345', { 'x-sentinel-token': agents[0].token })).status, 401);
+});
+
+test('the flag file enables the fallback while the env var is unset (hosted sandbox workaround)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sentinel-flag-'));
+  const flagFile = join(dir, 'agent-header-fallback.flag');
+  const report = { description: 'A fictional report gated by the flag file.' };
+  // No flag file: fallback stays off.
+  const off = await buildServer({ agentHeaderFallbackFile: join(dir, 'absent.flag') });
+  assert.equal((await invoke(off.server, 'POST', '/v1/agents/reports', report, null, { 'x-sentinel-token': agents[0].token })).status, 401);
+  // A "true" flag file turns the fallback on.
+  await writeFile(flagFile, 'true\n');
+  const on = await buildServer({ agentHeaderFallbackFile: flagFile });
+  const viaFile = await invoke(on.server, 'POST', '/v1/agents/reports', report, null, { 'x-sentinel-token': agents[0].token });
+  assert.equal(viaFile.status, 201);
+  assert.equal(viaFile.body.agentId, 'scout-01');
+  // An explicit override wins over a "false" flag file.
+  const overridden = await buildServer({ agentHeaderFallback: true, agentHeaderFallbackFile: flagFile });
+  assert.equal((await invoke(overridden.server, 'POST', '/v1/agents/reports', report, null, { 'x-sentinel-token': agents[0].token })).status, 201);
+  // A "false" flag file keeps the fallback off.
+  await writeFile(flagFile, 'false');
+  const disabled = await buildServer({ agentHeaderFallbackFile: flagFile });
+  assert.equal((await invoke(disabled.server, 'POST', '/v1/agents/reports', report, null, { 'x-sentinel-token': agents[0].token })).status, 401);
+  await rm(dir, { recursive: true, force: true });
 });
 
 test('revoked agents are rejected outright, fallback header included', async () => {

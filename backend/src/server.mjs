@@ -226,13 +226,21 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
   };
   const authenticatedAgentStrict = (req) => {
     const supplied = req.headers.authorization;
-    const agent = (typeof supplied === 'string' && supplied.startsWith('Bearer ')
+    const viaBearer = typeof supplied === 'string' && supplied.startsWith('Bearer ')
       ? matchAgentToken(supplied.slice(7))
-      : null)
+      : null;
+    const agent = viaBearer
       ?? (agentFallbackEnabled && typeof req.headers['x-sentinel-token'] === 'string'
         ? matchAgentToken(req.headers['x-sentinel-token'])
         : null);
     if (agent?.revoked) throw new DomainError(403, 'agent_revoked', 'This agent token has been revoked');
+    // Ollie 2026-10-20 20:41: log authentications that came through the
+    // fallback header — never the token itself — so usage volume stays
+    // visible and any off-host fallback usage stands out in the logs.
+    if (agent && !viaBearer) {
+      const route = new URL(req.url, 'http://localhost').pathname;
+      console.log(`[sentinel] agent-fallback-auth agent=${agent.id} route=${req.method} ${route} at=${new Date().toISOString()}`);
+    }
     return agent;
   };
 

@@ -173,9 +173,10 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
     typeof agent.name !== 'string' || agent.name.trim().length < 2 || agent.name.length > 100 ||
     typeof agent.token !== 'string' || agent.token.length < 24) ||
     new Set(configuredAgents.map((agent) => agent.token)).size !== configuredAgents.length ||
+    new Set(configuredAgents.map((agent) => agent.name.trim().toLocaleLowerCase())).size !== configuredAgents.length ||
     configuredAgents.some((agent) => configuredReviewers.some((item) => item.token === agent.token)) ||
     (discordBotToken !== null && configuredAgents.some((agent) => agent.token === discordBotToken))) {
-    throw new Error('Configure agent reporters with distinct IDs (2-64 chars), names (2-100 chars) and bearer tokens of at least 24 characters, distinct from reviewer and bot tokens');
+    throw new Error('Configure agent reporters with distinct IDs (2-64 chars), case-insensitively distinct names (2-100 chars) and bearer tokens of at least 24 characters, distinct from reviewer and bot tokens');
   }
   const authenticatedReviewer = (req) => configuredReviewers.find((item) => authorized(req, item.token)) ?? null;
   // Ollie 2026-10-20 03:10 review: agent tokens are accepted ONLY via the
@@ -187,7 +188,14 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
   };
   const authenticatedAgentStrict = (req) => {
     const token = agentBearerOnly(req);
-    const agent = token ? configuredAgents.find((item) => item.token === token) ?? null : null;
+    if (token === null) return null;
+    // Ollie 2026-10-20 follow-up: compare agent tokens in constant time like
+    // reviewer tokens — the plain === comparison undid the earlier hardening.
+    const expected = Buffer.from(token);
+    const agent = configuredAgents.find((item) => {
+      const candidate = Buffer.from(item.token);
+      return candidate.length === expected.length && timingSafeEqual(candidate, expected);
+    }) ?? null;
     if (agent?.revoked) throw new DomainError(403, 'agent_revoked', 'This agent token has been revoked');
     return agent;
   };
@@ -319,6 +327,7 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
             if (segments[4] === 'triage') return respond(res, 200, await mvp.triage(id, reviewer.id, await readJson(req)));
             if (segments[4] === 'merge') return respond(res, 200, await mvp.mergeDuplicate(id, reviewer.id, await readJson(req)));
             if (segments[4] === 'dismiss') return respond(res, 200, await mvp.dismissReport(id, reviewer.id, await readJson(req)));
+            if (segments[4] === 'reopen') return respond(res, 200, await mvp.reopenReport(id, reviewer.id));
             if (segments[4] === 'publication') return respond(res, 200, await mvp.proposeFromReport(id, reviewer.id, await readJson(req)));
           }
         }

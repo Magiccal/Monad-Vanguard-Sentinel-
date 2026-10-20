@@ -31,11 +31,14 @@ function text(value, label, min, max) {
 // strings — agent reports have reporterDiscordId: null, and 'null'.includes
 // coercion made any proposal containing the word "null" fail as private_identity.
 // It now also blocks the agent's ID and display name from public text.
+// Ollie 2026-10-20 follow-up: the guard is case-insensitive — "SCOUT ONE" must
+// not slip past a "scout one" identity the way it did in review.
 function publicText(value, label, min, max, forbidden) {
   const normalized = text(value, label, min, max);
   if (/\b(?:https?:\/\/|www\.)/i.test(normalized)) fail(400, 'unsafe_public_text', `${label} must not embed a clickable URL; use approved evidence references`);
   const identities = [forbidden].flat().filter((item) => typeof item === 'string' && item.length > 0);
-  if (identities.some((identity) => normalized.includes(identity))) {
+  const haystack = normalized.toLocaleLowerCase();
+  if (identities.some((identity) => haystack.includes(identity.toLocaleLowerCase()))) {
     fail(400, 'private_identity', `${label} must not expose the reporter's private identity`);
   }
   return normalized;
@@ -171,10 +174,16 @@ function approvalState(proposal, reviewerById, demo, rosterFingerprint, atMs) {
 // reports count toward the negative factor, and the throttle is a ratio rule —
 // one publication no longer lifts it forever; negative must stay at least 3
 // below publications.
+// Ollie 2026-10-20 follow-up: a duplicate only counts against the agent while
+// the canonical report it was merged into is still unpublished — once reviewers
+// publish the canonical, the duplicate's intel was right and stops hurting.
 export function agentReputation(data, agentId) {
   const reports = data.reports.filter((report) => report.reporterAgentId === agentId);
   const published = reports.filter((report) => report.incidentId && report.status === 'published').length;
-  const duplicates = reports.filter((report) => report.mergedInto).length;
+  const publishedIds = new Set(data.reports
+    .filter((report) => report.incidentId && report.status === 'published')
+    .map((report) => report.id));
+  const duplicates = reports.filter((report) => report.mergedInto && !publishedIds.has(report.mergedInto)).length;
   const dismissed = reports.filter((report) => report.status === 'dismissed').length;
   const open = reports.filter((report) => !report.incidentId && !report.mergedInto && report.status !== 'dismissed').length;
   const rejected = reports.filter((report) => !report.incidentId && !report.mergedInto && report.status !== 'dismissed'
@@ -203,8 +212,9 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
     !agent.id || typeof agent.id !== 'string' || !/^[a-z0-9_-]{2,64}$/i.test(agent.id) ||
     typeof agent.name !== 'string' || agent.name.trim().length < 2 || agent.name.length > 100 ||
     typeof agent.token !== 'string' || agent.token.length < 24) ||
-    new Set(agents.map((agent) => agent.token)).size !== agents.length) {
-    throw new Error('Agent reporters require distinct IDs (2-64 chars), display names (2-100 chars) and distinct bearer tokens of at least 24 characters');
+    new Set(agents.map((agent) => agent.token)).size !== agents.length ||
+    new Set(agents.map((agent) => agent.name.trim().toLocaleLowerCase())).size !== agents.length) {
+    throw new Error('Agent reporters require distinct IDs (2-64 chars), case-insensitively distinct display names (2-100 chars) and distinct bearer tokens of at least 24 characters');
   }
   function identityStrings(report) {
     const agent = report.reporterAgentId ? agentById.get(report.reporterAgentId) : null;
@@ -294,6 +304,9 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
   function createProposal(mvp, report, incident, reviewer, input, at) {
     noSelfReview(report, reviewer);
     if (report.status === 'merged') fail(409, 'invalid_transition', 'Merged reports cannot publish an incident');
+    // Ollie 2026-10-20 follow-up: a dismissed report must not be proposable
+    // again until a reviewer explicitly reopens it.
+    if (report.status === 'dismissed') fail(409, 'report_dismissed', 'This report was dismissed; reopen it before proposing');
     if (mvp.proposals.some((item) => item.status === 'pending' && item.reportId === report.id && item.incidentId === (incident?.id ?? null))) {
       fail(409, 'proposal_pending', 'A publication proposal is already pending');
     }
@@ -445,11 +458,34 @@ export function createMvpService(store, { now = () => new Date().toISOString(), 
         if (report.incidentId || report.mergedInto || report.status === 'dismissed') {
           fail(409, 'invalid_transition', 'Only open reports can be dismissed');
         }
+        // Ollie 2026-10-20 follow-up: dismissing while a publication proposal is
+        // pending let the proposal still approve and publish afterwards. Mirror
+        // merge's guard: reject the proposal first, then dismiss.
+        if (mvp.proposals.some((item) => item.status === 'pending' && item.reportId === report.id)) {
+          fail(409, 'proposal_pending', 'Reject the pending publication proposal before dismissing');
+        }
         const at = now();
         report.status = 'dismissed';
         report.updatedAt = at;
         report.history.push({ type: 'dismissed', actor: reviewer.id, at, reason: dismissalReason });
         return { id: report.id, status: report.status, dismissedAt: at, reason: dismissalReason };
+      });
+    },
+    // Ollie 2026-10-20 follow-up: explicit reopen path — a dismissed report is
+    // inert for proposals until a reviewer deliberately brings it back to the
+    // queue, so a stale dismissal can never silently flip into a publication.
+    reopenReport(id, reviewerId) {
+      const reviewer = actor(reviewerId);
+      return store.update((state) => {
+        const mvp = mvpState(state);
+        const report = find(mvp.reports, id, 'Report');
+        noSelfReview(report, reviewer);
+        if (report.status !== 'dismissed') fail(409, 'invalid_transition', 'Only dismissed reports can be reopened');
+        const at = now();
+        report.status = 'submitted';
+        report.updatedAt = at;
+        report.history.push({ type: 'reopened', actor: reviewer.id, at });
+        return { id: report.id, status: report.status, reopenedAt: at };
       });
     },
     listAgentReports(agentId) {

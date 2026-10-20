@@ -287,6 +287,20 @@ test('public text guards: the word "null" is fine, agent identity is not', async
     publicEvidenceIds: [evidenceId2],
   }, reviewers[0].token);
   assert.equal(leaked.body.error, 'private_identity');
+
+  // Ollie 2026-10-20 follow-up: the guard is case-insensitive — "SCOUT AGENT 01"
+  // must not slip past a "Scout Agent 01" identity.
+  const evidenceId3 = (await invoke(server, 'GET', `/v1/mvp/reports/${r2}`, undefined, reviewers[0].token)).body.evidence[0].id;
+  const leakedUpper = await invoke(server, 'POST', `/v1/mvp/reports/${r2}/publication`, {
+    ...publicNarrative,
+    summary: 'Filed by SCOUT AGENT 01, an automated scout, and confirmed by reviewers.',
+    verificationNote: 'The public level reflects the current human review and may change as evidence is checked.',
+    level: 'credible_threat', severity: 'low', title: 'Fictional identity leak attempt',
+    advice: ['Check official project channels while reviewers investigate.'],
+    reason: 'Public text must not carry the agent display name in any case.',
+    publicEvidenceIds: [evidenceId3],
+  }, reviewers[0].token);
+  assert.equal(leakedUpper.body.error, 'private_identity');
 });
 
 test('agent auth is strict: Authorization bearer only, no fallback header, no reviewer endpoints', async () => {
@@ -317,6 +331,8 @@ test('agent configuration is validated up front', async () => {
     [{ id: 'ok-agent', name: 'Scout', token: 'a'.repeat(24) }, { id: 'ok-agent', name: 'Scout 2', token: 'b'.repeat(24) }],
     [{ id: 'ok-agent', name: 'S', token: 'a'.repeat(24) }],
     [{ id: 'ok-agent', name: 'Scout', token: 'a'.repeat(24) }, { id: 'ok-agent-2', name: 'Scout 2', token: 'a'.repeat(24) }],
+    // Ollie 2026-10-20 follow-up: display names are case-insensitively distinct.
+    [{ id: 'ok-agent', name: 'Scout One', token: 'a'.repeat(24) }, { id: 'ok-agent-2', name: 'SCOUT ONE', token: 'b'.repeat(24) }],
   ];
   for (const agentConfig of bad) {
     assert.throws(() => createMvpService(Store.open(), { reviewers, agents: agentConfig }));
@@ -331,4 +347,105 @@ test('agent configuration is validated up front', async () => {
     agents: [{ id: 'ok-agent', name: 'Scout', token: reviewers[0].token }],
     mvp: createMvpService(Store.open(), { reviewers, agents: [{ id: 'ok-agent', name: 'Scout', token: reviewers[0].token }] }),
   }));
+});
+
+// Ollie 2026-10-20 follow-up: dismissing a report must not leave a pending
+// proposal able to approve and publish afterwards, and a dismissed report is
+// inert until a reviewer explicitly reopens it.
+test('dismiss is blocked while a proposal is pending; dismissed reports need an explicit reopen', async () => {
+  const { server } = await buildServer();
+  const r1 = (await invoke(server, 'POST', '/v1/agents/reports', {
+    description: 'Fictional report with a pending publication proposal.',
+    evidence: [transactionEvidence],
+  }, agents[0].token)).body.id;
+  const r2 = (await invoke(server, 'POST', '/v1/agents/reports', {
+    description: 'Fictional report dismissed before any proposal exists.',
+    evidence: [transactionEvidence],
+  }, agents[0].token)).body.id;
+
+  // Pending proposal blocks dismiss.
+  const evidenceId1 = (await invoke(server, 'GET', `/v1/mvp/reports/${r1}`, undefined, reviewers[0].token)).body.evidence[0].id;
+  const pending = (await invoke(server, 'POST', `/v1/mvp/reports/${r1}/publication`, {
+    ...publicNarrative,
+    level: 'credible_threat', severity: 'low', title: 'Fictional pending publication',
+    advice: ['Check official project channels while reviewers investigate.'],
+    reason: 'This pending proposal must block the dismiss action.',
+    publicEvidenceIds: [evidenceId1],
+  }, reviewers[0].token)).body.id;
+  const blocked = await invoke(server, 'POST', `/v1/mvp/reports/${r1}/dismiss`, {
+    reason: 'Reviewer tries to dismiss while the proposal is pending.',
+  }, reviewers[0].token);
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.body.error, 'proposal_pending');
+
+  // After the proposal is rejected, dismiss goes through.
+  await invoke(server, 'POST', `/v1/mvp/proposals/${pending}/rejection`, {
+    reason: 'Rejected so the dismiss action can proceed in this test.',
+  }, reviewers[1].token);
+  const dismissed = await invoke(server, 'POST', `/v1/mvp/reports/${r1}/dismiss`, {
+    reason: 'Dismissed after the pending proposal was rejected.',
+  }, reviewers[0].token);
+  assert.equal(dismissed.body.status, 'dismissed');
+
+  // A dismissed report cannot be proposed; reopen is explicit.
+  const evidenceId2 = (await invoke(server, 'GET', `/v1/mvp/reports/${r2}`, undefined, reviewers[0].token)).body.evidence[0].id;
+  // Reopen only applies to dismissed reports — r2 is still submitted here.
+  assert.equal((await invoke(server, 'POST', `/v1/mvp/reports/${r2}/reopen`, undefined, reviewers[0].token)).body.error, 'invalid_transition');
+  await invoke(server, 'POST', `/v1/mvp/reports/${r2}/dismiss`, {
+    reason: 'Dismissed up front so the reopen path can be tested.',
+  }, reviewers[0].token);
+  const proposedWhileDismissed = await invoke(server, 'POST', `/v1/mvp/reports/${r2}/publication`, {
+    ...publicNarrative,
+    level: 'credible_threat', severity: 'low', title: 'Fictional dismissed proposal',
+    advice: ['Check official project channels while reviewers investigate.'],
+    reason: 'Proposing on a dismissed report must fail outright.',
+    publicEvidenceIds: [evidenceId2],
+  }, reviewers[0].token);
+  assert.equal(proposedWhileDismissed.status, 409);
+  assert.equal(proposedWhileDismissed.body.error, 'report_dismissed');
+
+  // Reopen is explicit, then proposing works again.
+  const reopened = await invoke(server, 'POST', `/v1/mvp/reports/${r2}/reopen`, undefined, reviewers[0].token);
+  assert.equal(reopened.body.status, 'submitted');
+  const proposedAfterReopen = await invoke(server, 'POST', `/v1/mvp/reports/${r2}/publication`, {
+    ...publicNarrative,
+    level: 'credible_threat', severity: 'low', title: 'Fictional reopened proposal',
+    advice: ['Check official project channels while reviewers investigate.'],
+    reason: 'After an explicit reopen the report is proposable again.',
+    publicEvidenceIds: [evidenceId2],
+  }, reviewers[0].token);
+  assert.equal(proposedAfterReopen.status, 200);
+  assert.equal(proposedAfterReopen.body.status, 'pending');
+});
+
+// Ollie 2026-10-20 follow-up: a duplicate stops counting against the agent once
+// the canonical report it was merged into gets published — the intel was right.
+test('duplicate no longer penalizes the agent once the canonical report is published', async () => {
+  const { server } = await buildServer();
+  const file = async (description) => (await invoke(server, 'POST', '/v1/agents/reports', {
+    description, targets: [{ kind: 'address', value: `0x${'d'.repeat(40)}` }], evidence: [transactionEvidence],
+  }, agents[0].token)).body.id;
+  const canonical = await file('Canonical fictional agent report later published.');
+  const duplicate = await file('Duplicate fictional report merged into the canonical one.');
+
+  await invoke(server, 'POST', `/v1/mvp/reports/${duplicate}/merge`, {
+    intoReportId: canonical, reason: 'Merged as a duplicate of the canonical report.',
+  }, reviewers[0].token);
+  assert.equal((await invoke(server, 'GET', '/v1/agents/me', undefined, agents[0].token)).body.reputation.duplicates, 1);
+
+  const evidenceId = (await invoke(server, 'GET', `/v1/mvp/reports/${canonical}`, undefined, reviewers[0].token)).body.evidence[0].id;
+  const proposal = (await invoke(server, 'POST', `/v1/mvp/reports/${canonical}/publication`, {
+    ...publicNarrative,
+    level: 'credible_threat', severity: 'low', title: 'Fictional canonical publication',
+    advice: ['Check official project channels while reviewers investigate.'],
+    reason: 'Publishing the canonical clears the duplicate penalty.',
+    publicEvidenceIds: [evidenceId],
+  }, reviewers[0].token)).body.id;
+  await invoke(server, 'POST', `/v1/mvp/proposals/${proposal}/approval`, undefined, reviewers[1].token);
+
+  const me = (await invoke(server, 'GET', '/v1/agents/me', undefined, agents[0].token)).body.reputation;
+  assert.equal(me.published, 1);
+  assert.equal(me.duplicates, 0);
+  assert.equal(me.score, 3);
+  assert.equal(me.throttled, false);
 });

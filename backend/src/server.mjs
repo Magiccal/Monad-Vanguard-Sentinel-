@@ -1,10 +1,10 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { BlockList, isIP } from 'node:net';
-import { resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { createSentinel, DomainError } from './core.mjs';
 import { createMvpService, DISCLAIMER } from './mvp.mjs';
 import { Store } from './store.mjs';
@@ -500,8 +500,38 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
   });
 }
 
+// Ollie 2026-10-20 23:41: the hosted sandbox re-uploads the deployment
+// directory on every redeploy, which overwrites reports created live in the
+// sandbox. PLATFORM WORKAROUND (remove on proper hosting): when the
+// configured DATA_FILE sits inside the deployment directory, the server
+// keeps the live copy in a sibling sentinel-live-data/ directory outside
+// it instead — migrating from the configured seed on first use, and rolling
+// a small boot-time backup (5 most recent kept). Unwritable locations fall
+// back to the configured file untouched.
+function resolveDataFile() {
+  const configured = resolve(process.env.DATA_FILE || './data/sentinel.json');
+  if (!process.env.DATA_FILE) return configured; // plain local default: no relocation
+  const liveDir = resolve(dirname(configured), '..', 'sentinel-live-data');
+  const liveFile = resolve(liveDir, basename(configured));
+  try {
+    if (!existsSync(liveFile)) {
+      if (!existsSync(configured)) return configured;
+      mkdirSync(liveDir, { recursive: true });
+      copyFileSync(configured, liveFile);
+    }
+    const backupsDir = resolve(liveDir, 'backups');
+    mkdirSync(backupsDir, { recursive: true });
+    copyFileSync(liveFile, resolve(backupsDir, `${basename(configured)}.${Date.now()}.bak`));
+    for (const stale of readdirSync(backupsDir).sort().slice(0, -5)) rmSync(resolve(backupsDir, stale));
+    return liveFile;
+  } catch {
+    return configured; // relocation impossible here: keep the configured path
+  }
+}
+
 async function main() {
-  const file = resolve(process.env.DATA_FILE || './data/sentinel.json');
+  const file = resolveDataFile();
+  console.log(`[sentinel] data file: ${file}`);
   const store = await Store.open(file);
   const sentinel = createSentinel(store);
   const reviewers = process.env.REVIEWERS_JSON ? JSON.parse(process.env.REVIEWERS_JSON) : [{

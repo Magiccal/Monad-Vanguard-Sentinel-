@@ -194,9 +194,15 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
   // one-line "true" file named agent-header-fallback.flag into the runtime
   // working directory; the env flag stays the primary switch and the file is
   // only read when the env var is unset. Remove both on proper hosting.
-  // If a request carries an Authorization header, Bearer wins and the
-  // fallback is ignored — the two are never both tried, so a valid fallback
-  // can never rescue an invalid Bearer value.
+  // If a request carries a Bearer value that authenticates a known agent,
+  // Bearer wins — a different agent's fallback token can never shadow the
+  // Bearer identity. Otherwise the fallback header is consulted: live check
+  // 2026-10-20 19:4x showed the hosted reverse proxy REPLACES the client
+  // Authorization header with its own platform JWT on every public-domain
+  // request, so a strict "Authorization present => ignore the fallback"
+  // rule would make the workaround dead on this host. Whichever header
+  // matches still goes through the same constant-time comparison, and a
+  // revoked agent is rejected with 403 through either header.
   // `agentHeaderFallback` / `agentHeaderFallbackFile` override the env flag
   // and flag-file path (tests); defaults read the environment / cwd.
   const readFallbackFlagFile = (filePath) => {
@@ -210,30 +216,22 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
     ?? process.env.AGENT_TOKEN_HEADER_FALLBACK
     ?? readFallbackFlagFile(agentHeaderFallbackFile ?? 'agent-header-fallback.flag');
   const agentFallbackEnabled = fallbackSetting === true || fallbackSetting === 'true';
-  const agentTokenCandidates = (req) => {
-    const candidates = [];
-    const supplied = req.headers.authorization;
-    if (typeof supplied === 'string') {
-      if (supplied.startsWith('Bearer ')) candidates.push(supplied.slice(7));
-      return candidates; // any Authorization header present: ignore the fallback
-    }
-    if (agentFallbackEnabled) {
-      const fallback = req.headers['x-sentinel-token'];
-      if (typeof fallback === 'string') candidates.push(fallback);
-    }
-    return candidates;
+  // Compare agent tokens in constant time like reviewer tokens.
+  const matchAgentToken = (token) => {
+    const expected = Buffer.from(token);
+    return configuredAgents.find((item) => {
+      const candidate = Buffer.from(item.token);
+      return candidate.length === expected.length && timingSafeEqual(candidate, expected);
+    }) ?? null;
   };
   const authenticatedAgentStrict = (req) => {
-    const tokens = agentTokenCandidates(req);
-    if (!tokens.length) return null;
-    // Compare agent tokens in constant time like reviewer tokens.
-    const agent = tokens.map((token) => {
-      const expected = Buffer.from(token);
-      return configuredAgents.find((item) => {
-        const candidate = Buffer.from(item.token);
-        return candidate.length === expected.length && timingSafeEqual(candidate, expected);
-      }) ?? null;
-    }).find(Boolean) ?? null;
+    const supplied = req.headers.authorization;
+    const agent = (typeof supplied === 'string' && supplied.startsWith('Bearer ')
+      ? matchAgentToken(supplied.slice(7))
+      : null)
+      ?? (agentFallbackEnabled && typeof req.headers['x-sentinel-token'] === 'string'
+        ? matchAgentToken(req.headers['x-sentinel-token'])
+        : null);
     if (agent?.revoked) throw new DomainError(403, 'agent_revoked', 'This agent token has been revoked');
     return agent;
   };

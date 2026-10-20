@@ -33,12 +33,18 @@ function text(value, label, min, max) {
 // It now also blocks the agent's ID and display name from public text.
 // Ollie 2026-10-20 follow-up: the guard is case-insensitive — "SCOUT ONE" must
 // not slip past a "scout one" identity the way it did in review.
+// Ollie 2026-10-20 18:43: it also folds hyphens/underscores to spaces, so the
+// scout id "envio-scout" and the name "Envio Scout" both match in any case,
+// while a bare "Envio" stays fine.
+function identityVariants(value) {
+  return String(value).toLocaleLowerCase().replace(/[-_]+/g, ' ');
+}
 function publicText(value, label, min, max, forbidden) {
   const normalized = text(value, label, min, max);
   if (/\b(?:https?:\/\/|www\.)/i.test(normalized)) fail(400, 'unsafe_public_text', `${label} must not embed a clickable URL; use approved evidence references`);
   const identities = [forbidden].flat().filter((item) => typeof item === 'string' && item.length > 0);
-  const haystack = normalized.toLocaleLowerCase();
-  if (identities.some((identity) => haystack.includes(identity.toLocaleLowerCase()))) {
+  const haystack = identityVariants(normalized);
+  if (identities.some((identity) => haystack.includes(identityVariants(identity)))) {
     fail(400, 'private_identity', `${label} must not expose the reporter's private identity`);
   }
   return normalized;

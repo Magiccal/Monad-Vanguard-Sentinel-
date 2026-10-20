@@ -44,12 +44,13 @@ function invoke(server, method, url, body, token, extraHeaders = {}) {
   });
 }
 
-async function buildServer({ withAgents = true, agentConfig = agents } = {}) {
+async function buildServer({ withAgents = true, agentConfig = agents, agentHeaderFallback = null } = {}) {
   const store = await Store.open();
   const mvp = createMvpService(store, { reviewers, agents: withAgents ? agentConfig : [] });
   const server = createApiServer({
     sentinel: createSentinel(store), mvp, reviewers,
     agents: withAgents ? agentConfig : [], discordBotToken: botToken,
+    agentHeaderFallback,
   });
   return { store, mvp, server };
 }
@@ -301,12 +302,46 @@ test('public text guards: the word "null" is fine, agent identity is not', async
     publicEvidenceIds: [evidenceId3],
   }, reviewers[0].token);
   assert.equal(leakedUpper.body.error, 'private_identity');
+
+  // Ollie 2026-10-20 18:43: the hyphenated agent id also matches in any case,
+  // while "Scout" alone stays fine.
+  const evidenceId4 = (await invoke(server, 'GET', `/v1/mvp/reports/${r2}`, undefined, reviewers[0].token)).body.evidence[0].id;
+  const leakedHyphen = await invoke(server, 'POST', `/v1/mvp/reports/${r2}/publication`, {
+    ...publicNarrative,
+    summary: 'Report scout 01 was checked and the fictional page was confirmed malicious.',
+    verificationNote: 'The public level reflects the current human review and may change as evidence is checked.',
+    level: 'credible_threat', severity: 'low', title: 'Fictional identity leak attempt',
+    advice: ['Check official project channels while reviewers investigate.'],
+    reason: 'Public text must not carry the agent id in any spelling.',
+    publicEvidenceIds: [evidenceId4],
+  }, reviewers[0].token);
+  assert.equal(leakedHyphen.body.error, 'private_identity');
+  const hyphenExact = await invoke(server, 'POST', `/v1/mvp/reports/${r2}/publication`, {
+    ...publicNarrative,
+    summary: 'Report scout-01 was checked and the fictional page was confirmed malicious.',
+    verificationNote: 'The public level reflects the current human review and may change as evidence is checked.',
+    level: 'credible_threat', severity: 'low', title: 'Fictional identity leak attempt',
+    advice: ['Check official project channels while reviewers investigate.'],
+    reason: 'Public text must not carry the agent id in hyphen spelling.',
+    publicEvidenceIds: [evidenceId4],
+  }, reviewers[0].token);
+  assert.equal(hyphenExact.body.error, 'private_identity');
+  const scoutAlone = await invoke(server, 'POST', `/v1/mvp/reports/${r2}/publication`, {
+    ...publicNarrative,
+    summary: 'A fictional scout page was reviewed and reviewers confirmed the phishing pattern.',
+    verificationNote: 'The public level reflects the current human review and may change as evidence is checked.',
+    level: 'credible_threat', severity: 'low', title: 'Fictional single-word summary',
+    advice: ['Check official project channels while reviewers investigate.'],
+    reason: 'The word scout alone does not expose the reporter identity.',
+    publicEvidenceIds: [evidenceId4],
+  }, reviewers[0].token);
+  assert.equal(scoutAlone.status, 200);
 });
 
-test('agent auth is strict: Authorization bearer only, no fallback header, no reviewer endpoints', async () => {
+test('agent auth default is Bearer only: the fallback header is ignored while AGENT_TOKEN_HEADER_FALLBACK is off', async () => {
   const { server } = await buildServer();
   const report = { description: 'A fictional report sent with a fallback header.' };
-  // Fallback header must not authenticate agents.
+  // Fallback header must not authenticate agents while the flag is off.
   assert.equal((await invoke(server, 'POST', '/v1/agents/reports', report, null, { 'x-sentinel-token': agents[0].token })).status, 401);
   // Bearer works.
   assert.equal((await invoke(server, 'POST', '/v1/agents/reports', report, agents[0].token)).status, 201);
@@ -316,13 +351,35 @@ test('agent auth is strict: Authorization bearer only, no fallback header, no re
   assert.equal((await invoke(server, 'GET', '/v1/mvp/notifications/outbox', undefined, agents[0].token)).status, 401);
 });
 
-test('revoked agents are rejected outright', async () => {
+test('AGENT_TOKEN_HEADER_FALLBACK=true accepts the fallback header on agent routes only, Bearer always wins', async () => {
+  const { server } = await buildServer({ agentHeaderFallback: true });
+  const report = { description: 'A fictional report sent through the proxy workaround.' };
+  // Fallback header authenticates the agent on agent routes.
+  const viaFallback = await invoke(server, 'POST', '/v1/agents/reports', report, null, { 'x-sentinel-token': agents[0].token });
+  assert.equal(viaFallback.status, 201);
+  assert.equal(viaFallback.body.agentId, 'scout-01');
+  assert.equal((await invoke(server, 'GET', '/v1/agents/me', undefined, null, { 'x-sentinel-token': agents[0].token })).status, 200);
+  // But never on reviewer routes, even with the flag on.
+  assert.equal((await invoke(server, 'GET', '/v1/mvp/reports', undefined, null, { 'x-sentinel-token': agents[0].token })).status, 401);
+  // Both headers: Bearer wins and the fallback is ignored — never both tried.
+  const both = await invoke(server, 'POST', '/v1/agents/reports', report, agents[0].token, { 'x-sentinel-token': agents[1].token });
+  assert.equal(both.status, 201);
+  assert.equal(both.body.agentId, 'scout-01');
+  // An invalid Bearer is not rescued by a valid fallback header.
+  assert.equal((await invoke(server, 'POST', '/v1/agents/reports', report, 'wrong-token-wrong-token-wrong-token', { 'x-sentinel-token': agents[0].token })).status, 401);
+  assert.equal((await invoke(server, 'POST', '/v1/agents/reports', report, 'Basic not-a-bearer-value-here-12345', { 'x-sentinel-token': agents[0].token })).status, 401);
+});
+
+test('revoked agents are rejected outright, fallback header included', async () => {
   const revoked = [{ id: 'scout-01', name: 'Scout Agent 01', token: 'scout-agent-01-test-secret-token-123', revoked: true }];
-  const { server } = await buildServer({ agentConfig: revoked });
+  const { server } = await buildServer({ agentConfig: revoked, agentHeaderFallback: true });
   const first = await invoke(server, 'POST', '/v1/agents/reports', { description: 'A fictional report from a revoked agent.' }, revoked[0].token);
   assert.equal(first.status, 403);
   assert.equal(first.body.error, 'agent_revoked');
   assert.equal((await invoke(server, 'GET', '/v1/agents/me', undefined, revoked[0].token)).body.error, 'agent_revoked');
+  const viaFallback = await invoke(server, 'POST', '/v1/agents/reports', { description: 'A revoked agent trying the fallback header.' }, null, { 'x-sentinel-token': revoked[0].token });
+  assert.equal(viaFallback.status, 403);
+  assert.equal(viaFallback.body.error, 'agent_revoked');
 });
 
 test('agent configuration is validated up front', async () => {

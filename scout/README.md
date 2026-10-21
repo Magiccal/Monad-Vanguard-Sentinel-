@@ -43,7 +43,8 @@ registered `envio-scout` agent. **It never publishes** — everything files as
 | `SCOUT_MAX_PER_24H` / `SCOUT_MIN_SPACING_H` | `3` / `2` | Self-caps. |
 | `SCOUT_MAX_BLOCKS_PER_CYCLE` | `400` | Blocks processed per cycle. Monad testnet produces ~3.7 blocks/s (~220 per 60s cycle), so 400 keeps up with margin. |
 | `SCOUT_BLOCK_BATCH_SIZE` | `50` | JSON-RPC batch size for `eth_getBlockReceipts` (one POST per batch, ~25 blocks/s measured). Falls back to per-block receipts, then the classic full-block scan. |
-| `SCOUT_LAG_JUMP_BLOCKS` / `SCOUT_LAG_JUMP_TAIL` | `800` / `10` | Only after real downtime: if the cursor falls more than 800 blocks behind (≈2 cycles of drift is ~450, so normal operation never triggers), skip the gap and resume at latest−10. **Every skipped range is logged and kept in state (`stats.skippedRanges`), so gaps are auditable.** |
+| `SCOUT_LAG_JUMP_BLOCKS` / `SCOUT_LAG_JUMP_TAIL` | `800` / `10` | Only after real downtime: if the cursor falls more than 800 blocks behind (normal drift never triggers), skip the gap and resume at latest−10. **Every skipped range is logged and kept in state (`stats.skippedRanges`), so gaps are auditable.** |
+| `SCOUT_RECEIPTS_WINDOW` | `30` | Never scan past latest−N: the public RPC only serves `eth_getBlockReceipts` for a recent window (measured: nulls start at ~300 blocks behind the tip), so blocks outside it are deferred, never silently marked scanned. Any unexpected null receipt is counted in `stats.receiptUnavailable` and logged. |
 
 Deployment detection: the scout prefers `eth_getBlockReceipts` (one call per
 block, catches both direct creations and factory deployments); it falls back

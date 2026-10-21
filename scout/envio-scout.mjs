@@ -174,8 +174,17 @@ if (existsSync(STATE_FILE)) {
   try {
     const loaded = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
     state = { ...state, ...loaded };
-    // Backfill stats fields added later, so an existing state file keeps working.
-    state.stats = { ...state.stats, blocksScanned: state.stats.blocksScanned ?? 0 };
+    // Backfill stats fields added later, so an existing state file keeps
+    // working. Without this, a counter missing from an old state file turns
+    // `undefined += N` into NaN on first increment.
+    state.stats = {
+      contractsSeen: state.stats.contractsSeen ?? 0,
+      impersonationOnly: state.stats.impersonationOnly ?? 0,
+      bothSignals: state.stats.bothSignals ?? 0,
+      skippedRanges: state.stats.skippedRanges ?? [],
+      receiptUnavailable: state.stats.receiptUnavailable ?? 0,
+      blocksScanned: state.stats.blocksScanned ?? 0,
+    };
   } catch { /* fresh state */ }
 }
 

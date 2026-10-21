@@ -41,7 +41,8 @@ registered `envio-scout` agent. **It never publishes** — everything files as
 | `SCOUT_DRY_RUN_LOG` | `./scout-dry-run.log` | Dry-run payload log. |
 | `SCOUT_WATCHLIST_FILE` | `./impersonation-watchlist.json` | Brand list (JSON array of lowercase strings). |
 | `SCOUT_MAX_PER_24H` / `SCOUT_MIN_SPACING_H` | `3` / `2` | Self-caps. |
-| `SCOUT_MAX_BLOCKS_PER_CYCLE` | `120` | Blocks processed per cycle (one `eth_getBlockReceipts` call each). |
+| `SCOUT_MAX_BLOCKS_PER_CYCLE` | `300` | Blocks processed per cycle. Monad testnet produces ~3.7 blocks/s, so 300 per 60s cycle keeps up with margin. |
+| `SCOUT_BLOCK_BATCH_SIZE` | `50` | JSON-RPC batch size for `eth_getBlockReceipts` (one POST per batch, ~25 blocks/s measured). Falls back to per-block receipts, then the classic full-block scan. |
 | `SCOUT_LAG_JUMP_BLOCKS` / `SCOUT_LAG_JUMP_TAIL` | `200` / `10` | If the cursor falls more than 200 blocks behind, skip the gap and resume at latest−10 (near-real-time watch, not historical backfill). **Every skipped range is logged and kept in state (`stats.skippedRanges`), so gaps are auditable.** |
 
 Deployment detection: the scout prefers `eth_getBlockReceipts` (one call per

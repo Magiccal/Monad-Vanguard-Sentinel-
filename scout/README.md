@@ -83,6 +83,11 @@ The day's report to the Lead draws on two artifacts:
   `impersonationOnly` (weak — lookalike name but no drainer controls, **not
   filed**), `bothSignals` (strong flags that would have been filed),
   `skippedRanges` (blocks not scanned due to lag jumps).
+- **Coverage line** (in state + every `cycle done` log): `scanned` vs
+  `produced` since `startedAt` (`firstCycleTip` is the anchor), plus
+  `skipped` (total blocks in skipped ranges) and `nullReceipts`
+  (`stats.receiptUnavailable`) — so the report can show the numbers cover
+  the whole day.
 - `scout-dry-run.log` → one `IMPERSONATION-ONLY` line per weak match (address,
   brand, symbol/name, tx) plus the **full payload** for every strong flag —
   example payloads come straight from here.

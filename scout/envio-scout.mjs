@@ -154,6 +154,10 @@ let state = {
   cursorBlock: null,
   seen: {},
   filings: [],
+  // Running totals for the dry-run report Ollie asked for: how many
+  // contracts were checked, how many were impersonation-only (weak), and
+  // how many hit BOTH signals (strong flags).
+  stats: { contractsSeen: 0, impersonationOnly: 0, bothSignals: 0, skippedRanges: [] },
   startedAt: new Date().toISOString(),
 };
 if (existsSync(STATE_FILE)) {
@@ -269,9 +273,15 @@ async function scanCycle() {
   }
   // Near-real-time watch, not historical backfill: if we ever fall too far
   // behind (downtime, RPC slowness), skip the gap instead of drowning in it.
+  // Ollie's ask: always log WHICH blocks were skipped, not just that a jump
+  // happened, so the gap is auditable later.
   if (latest - state.cursorBlock > LAG_JUMP_BLOCKS) {
-    log(`lag detected: cursor ${state.cursorBlock} is >${LAG_JUMP_BLOCKS} blocks behind latest ${latest} — jumping to latest-${LAG_JUMP_TAIL}`);
-    state.cursorBlock = latest - LAG_JUMP_TAIL;
+    const skippedFrom = state.cursorBlock + 1;
+    const skippedTo = latest - LAG_JUMP_TAIL;
+    log(`lag detected: cursor ${state.cursorBlock} is >${LAG_JUMP_BLOCKS} blocks behind latest ${latest} — SKIPPING blocks ${skippedFrom}..${skippedTo} (${skippedTo - skippedFrom + 1} blocks not scanned), resuming at ${skippedTo + 1}`);
+    state.stats.skippedRanges.push({ from: skippedFrom, to: skippedTo, blocks: skippedTo - skippedFrom + 1, at: new Date().toISOString() });
+    state.stats.skippedRanges = state.stats.skippedRanges.slice(-50);
+    state.cursorBlock = skippedTo;
     saveState();
   }
   const startBlock = state.cursorBlock + 1;
@@ -305,6 +315,7 @@ async function scanCycle() {
     for (const { txHash, address } of creations) {
       if (state.seen[address]) continue;
       state.seen[address] = txHash;
+      state.stats.contractsSeen += 1;
       const [symbol, name] = await Promise.all([
         readContractString(address, SELECTOR.symbol, 'symbol'),
         readContractString(address, SELECTOR.name, 'name'),
@@ -315,10 +326,16 @@ async function scanCycle() {
       const code = await jsonRpc('eth_getCode', [address, 'latest']);
       const honeypotFn = honeypotMatch(code);
       if (!honeypotFn) {
-        log(`impersonation-only match skipped (needs both signals): ${address} symbol="${symbol}" brand=${impersonation.brand}`);
+        // Weak signal (impersonation name only). Recorded — not filed — so the
+        // dry-run report can separate strong flags from lookalike noise.
+        state.stats.impersonationOnly += 1;
+        const line = `${new Date().toISOString()} IMPERSONATION-ONLY (not filed, needs both signals) contract ${address} brand=${impersonation.brand} match=${impersonation.where} symbol="${symbol || ''}" name="${name || ''}" tx=${txHash}\n`;
+        appendFileSync(DRY_RUN_LOG, line);
+        log(`impersonation-only match skipped (needs both signals): ${address} symbol="${symbol}" brand=${impersonation.brand} (recorded to ${DRY_RUN_LOG})`);
         continue;
       }
       candidates += 1;
+      state.stats.bothSignals += 1;
       const rate = rateCapStatus();
       const candidate = { address, txHash, symbol: symbol || '(empty)', name: name || '(empty)', ...impersonation, honeypotFn };
       if (killSwitchPresent()) {

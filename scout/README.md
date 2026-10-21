@@ -42,7 +42,7 @@ registered `envio-scout` agent. **It never publishes** — everything files as
 | `SCOUT_WATCHLIST_FILE` | `./impersonation-watchlist.json` | Brand list (JSON array of lowercase strings). |
 | `SCOUT_MAX_PER_24H` / `SCOUT_MIN_SPACING_H` | `3` / `2` | Self-caps. |
 | `SCOUT_MAX_BLOCKS_PER_CYCLE` | `120` | Blocks processed per cycle (one `eth_getBlockReceipts` call each). |
-| `SCOUT_LAG_JUMP_BLOCKS` / `SCOUT_LAG_JUMP_TAIL` | `200` / `10` | If the cursor falls more than 200 blocks behind, skip the gap and resume at latest−10 (near-real-time watch, not historical backfill). |
+| `SCOUT_LAG_JUMP_BLOCKS` / `SCOUT_LAG_JUMP_TAIL` | `200` / `10` | If the cursor falls more than 200 blocks behind, skip the gap and resume at latest−10 (near-real-time watch, not historical backfill). **Every skipped range is logged and kept in state (`stats.skippedRanges`), so gaps are auditable.** |
 
 Deployment detection: the scout prefers `eth_getBlockReceipts` (one call per
 block, catches both direct creations and factory deployments); it falls back
@@ -72,6 +72,21 @@ DRY_RUN=false SENTINEL_TOKEN="$(cat ~/.workbuddy/sentinel-local/agent-envio-scou
 ```
 
 Stop immediately: `touch ~/.workbuddy/sentinel-local/scout/scout-paused.flag`.
+
+## Dry-run report (what we review before real mode)
+
+The day's report to the Lead draws on two artifacts:
+
+- `scout-state.json` → `stats`: `contractsSeen` (token-like contracts checked),
+  `impersonationOnly` (weak — lookalike name but no drainer controls, **not
+  filed**), `bothSignals` (strong flags that would have been filed),
+  `skippedRanges` (blocks not scanned due to lag jumps).
+- `scout-dry-run.log` → one `IMPERSONATION-ONLY` line per weak match (address,
+  brand, symbol/name, tx) plus the **full payload** for every strong flag —
+  example payloads come straight from here.
+
+Genuine-vs-noise judgement is made by a human over these entries; the scout
+never files the weak ones.
 
 ## Honest scope notes
 

@@ -159,14 +159,24 @@ let state = {
   cursorBlock: null,
   seen: {},
   filings: [],
+  // Chain tip observed on the very first cycle of a run — the denominator
+  // anchor for the daily coverage number in the dry-run report.
+  firstCycleTip: null,
   // Running totals for the dry-run report Ollie asked for: how many
   // contracts were checked, how many were impersonation-only (weak), and
-  // how many hit BOTH signals (strong flags).
-  stats: { contractsSeen: 0, impersonationOnly: 0, bothSignals: 0, skippedRanges: [], receiptUnavailable: 0 },
+  // how many hit BOTH signals (strong flags). blocksScanned feeds the
+  // coverage line (scanned vs produced); skippedRanges and
+  // receiptUnavailable make the coverage number honest.
+  stats: { contractsSeen: 0, impersonationOnly: 0, bothSignals: 0, skippedRanges: [], receiptUnavailable: 0, blocksScanned: 0 },
   startedAt: new Date().toISOString(),
 };
 if (existsSync(STATE_FILE)) {
-  try { state = { ...state, ...JSON.parse(readFileSync(STATE_FILE, 'utf8')) }; } catch { /* fresh state */ }
+  try {
+    const loaded = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+    state = { ...state, ...loaded };
+    // Backfill stats fields added later, so an existing state file keeps working.
+    state.stats = { ...state.stats, blocksScanned: state.stats.blocksScanned ?? 0 };
+  } catch { /* fresh state */ }
 }
 
 function saveState() {
@@ -334,8 +344,14 @@ async function fileReport(candidate) {
 
 async function scanCycle() {
   const latest = Number(await jsonRpc('eth_blockNumber', []));
+  if (state.firstCycleTip === null || state.firstCycleTip === undefined) {
+    // Fresh run: anchor at the current tip. Restarted run (cursor exists):
+    // anchor at the cursor so coverage is not overstated.
+    state.firstCycleTip = state.cursorBlock === null ? latest : state.cursorBlock;
+  }
   if (state.cursorBlock === null) {
     state.cursorBlock = latest - START_BLOCKS_BACK;
+    state.firstCycleTip = latest;
     log(`first cycle: starting from block ${state.cursorBlock} (latest ${latest})`);
   }
   // Near-real-time watch, not historical backfill: if we ever fall too far
@@ -402,8 +418,11 @@ async function scanCycle() {
       }
   }
   state.cursorBlock = target;
+  if (target >= startBlock) state.stats.blocksScanned += target - startBlock + 1;
   saveState();
-  log(`cycle done: blocks ${startBlock}..${target} scanned, ${candidates} candidate(s), ${Object.keys(state.seen).length} contracts seen`);
+  const produced = Math.max(0, latest - state.firstCycleTip);
+  const skippedTotal = state.stats.skippedRanges.reduce((sum, r) => sum + r.blocks, 0);
+  log(`cycle done: blocks ${startBlock}..${target} scanned, ${candidates} candidate(s), ${Object.keys(state.seen).length} contracts seen | coverage: scanned=${state.stats.blocksScanned} produced=${produced} skipped=${skippedTotal} nullReceipts=${state.stats.receiptUnavailable} since ${state.startedAt}`);
 }
 
 function pruneState() {

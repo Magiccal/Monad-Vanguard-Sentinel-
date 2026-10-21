@@ -126,6 +126,10 @@ const MAX_BLOCKS_PER_CYCLE = Number(ENV.SCOUT_MAX_BLOCKS_PER_CYCLE || 400);
 const BLOCK_BATCH_SIZE = Number(ENV.SCOUT_BLOCK_BATCH_SIZE || 50);
 const LAG_JUMP_BLOCKS = Number(ENV.SCOUT_LAG_JUMP_BLOCKS || 800);
 const LAG_JUMP_TAIL = Number(ENV.SCOUT_LAG_JUMP_TAIL || 10);
+// The public RPC only serves eth_getBlockReceipts for a recent window
+// (measured: blocks ~300+ behind the tip start returning null). Never scan
+// past latest minus this margin, so receipts are always available.
+const RECEIPTS_WINDOW_MARGIN = Number(ENV.SCOUT_RECEIPTS_WINDOW || 30);
 const START_BLOCKS_BACK = Number(ENV.SCOUT_START_BLOCKS_BACK || 30);
 
 const DEFAULT_WATCHLIST = ['usdc', 'usdt', 'tether', 'monad', 'envio', 'binance', 'coinbase', 'uniswap', 'metamask', 'opensea', 'aave', 'pendle'];
@@ -158,7 +162,7 @@ let state = {
   // Running totals for the dry-run report Ollie asked for: how many
   // contracts were checked, how many were impersonation-only (weak), and
   // how many hit BOTH signals (strong flags).
-  stats: { contractsSeen: 0, impersonationOnly: 0, bothSignals: 0, skippedRanges: [] },
+  stats: { contractsSeen: 0, impersonationOnly: 0, bothSignals: 0, skippedRanges: [], receiptUnavailable: 0 },
   startedAt: new Date().toISOString(),
 };
 if (existsSync(STATE_FILE)) {
@@ -236,6 +240,7 @@ async function fetchCreations(startBlock, target) {
   if (BLOCK_BATCH_SIZE > 1) {
     try {
       const creations = [];
+      let unavailable = 0;
       for (let from = startBlock; from <= target; from += BLOCK_BATCH_SIZE) {
         const to = Math.min(target, from + BLOCK_BATCH_SIZE - 1);
         const batch = [];
@@ -246,26 +251,29 @@ async function fetchCreations(startBlock, target) {
         if (!Array.isArray(body) || body.length !== batch.length) throw new Error('RPC rejected JSON-RPC batch');
         for (const entry of body) {
           const receipts = entry?.result;
-          if (!Array.isArray(receipts)) continue; // null result = block has no receipts yet
+          if (receipts === null || receipts === undefined) { unavailable += 1; continue; }
+          if (!Array.isArray(receipts)) continue;
           for (const r of receipts) {
             if (r.contractAddress && r.transactionHash) creations.push({ txHash: r.transactionHash, address: r.contractAddress });
           }
         }
       }
-      return creations;
+      return { creations, unavailable };
     } catch { /* fall through to per-block */ }
   }
   try {
     const creations = [];
+    let unavailable = 0;
     for (let block = startBlock; block <= target; block += 1) {
       const receipts = await jsonRpc('eth_getBlockReceipts', [`0x${block.toString(16)}`]);
+      if (receipts === null || receipts === undefined) { unavailable += 1; continue; }
       if (Array.isArray(receipts)) {
         for (const r of receipts) {
           if (r.contractAddress && r.transactionHash) creations.push({ txHash: r.transactionHash, address: r.contractAddress });
         }
       }
     }
-    return creations;
+    return { creations, unavailable };
   } catch { /* fall through to classic scan */ }
   const creations = [];
   for (let block = startBlock; block <= target; block += 1) {
@@ -278,7 +286,7 @@ async function fetchCreations(startBlock, target) {
       }
     }
   }
-  return creations;
+  return { creations, unavailable: 0 };
 }
 
 function rateCapStatus(now = Date.now()) {
@@ -344,9 +352,16 @@ async function scanCycle() {
     saveState();
   }
   const startBlock = state.cursorBlock + 1;
-  const target = Math.min(latest, state.cursorBlock + MAX_BLOCKS_PER_CYCLE);
+  // Receipts are only available inside a recent window — cap the scan tip so
+  // every block we mark scanned actually had its receipts read.
+  const safeTip = Math.max(state.cursorBlock, latest - RECEIPTS_WINDOW_MARGIN);
+  const target = Math.min(safeTip, state.cursorBlock + MAX_BLOCKS_PER_CYCLE);
   let candidates = 0;
-  const creations = await fetchCreations(startBlock, target);
+  const { creations, unavailable } = await fetchCreations(startBlock, target);
+  if (unavailable > 0) {
+    state.stats.receiptUnavailable += unavailable;
+    log(`warning: ${unavailable} block(s) in ${startBlock}..${target} returned null receipts (outside the RPC window) — counted in stats.receiptUnavailable`);
+  }
   for (const { txHash, address } of creations) {
       if (state.seen[address]) continue;
       state.seen[address] = txHash;

@@ -122,7 +122,8 @@ const DRY_RUN_LOG = resolve(ENV.SCOUT_DRY_RUN_LOG || 'scout-dry-run.log');
 const WATCHLIST_FILE = resolve(ENV.SCOUT_WATCHLIST_FILE || 'impersonation-watchlist.json');
 const MAX_PER_24H = Number(ENV.SCOUT_MAX_PER_24H || 3);
 const MIN_SPACING_MS = Number(ENV.SCOUT_MIN_SPACING_H || 2) * 3600_000;
-const MAX_BLOCKS_PER_CYCLE = Number(ENV.SCOUT_MAX_BLOCKS_PER_CYCLE || 120);
+const MAX_BLOCKS_PER_CYCLE = Number(ENV.SCOUT_MAX_BLOCKS_PER_CYCLE || 300);
+const BLOCK_BATCH_SIZE = Number(ENV.SCOUT_BLOCK_BATCH_SIZE || 50);
 const LAG_JUMP_BLOCKS = Number(ENV.SCOUT_LAG_JUMP_BLOCKS || 200);
 const LAG_JUMP_TAIL = Number(ENV.SCOUT_LAG_JUMP_TAIL || 10);
 const START_BLOCKS_BACK = Number(ENV.SCOUT_START_BLOCKS_BACK || 30);
@@ -172,13 +173,17 @@ function log(message) {
   console.log(`[scout ${new Date().toISOString()}] ${message}`);
 }
 
-async function jsonRpc(method, params) {
+async function postRpc(payload) {
   const response = await fetch(RPC_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    body: JSON.stringify(payload),
   });
-  const body = await response.json();
+  return response.json();
+}
+
+async function jsonRpc(method, params) {
+  const body = await postRpc({ jsonrpc: '2.0', id: 1, method, params });
   if (body.error) throw new Error(`${method}: ${JSON.stringify(body.error)}`);
   return body.result;
 }
@@ -220,6 +225,60 @@ async function readContractString(address, selector, label) {
 
 function killSwitchPresent() {
   return existsSync(KILL_FILE);
+}
+
+// Monad testnet produces blocks far faster than one-RPC-call-per-block can
+// scan (measured ~3.7 blocks/s), so the default path batches many
+// eth_getBlockReceipts calls into a single JSON-RPC batch POST — one round
+// trip per ~50 blocks (measured ~25 blocks/s, comfortably ahead of the
+// chain). Fallbacks: per-block receipts, then the classic full-block scan.
+async function fetchCreations(startBlock, target) {
+  if (BLOCK_BATCH_SIZE > 1) {
+    try {
+      const creations = [];
+      for (let from = startBlock; from <= target; from += BLOCK_BATCH_SIZE) {
+        const to = Math.min(target, from + BLOCK_BATCH_SIZE - 1);
+        const batch = [];
+        for (let b = from; b <= to; b += 1) {
+          batch.push({ jsonrpc: '2.0', id: b - from, method: 'eth_getBlockReceipts', params: [`0x${b.toString(16)}`] });
+        }
+        const body = await postRpc(batch);
+        if (!Array.isArray(body) || body.length !== batch.length) throw new Error('RPC rejected JSON-RPC batch');
+        for (const entry of body) {
+          const receipts = entry?.result;
+          if (!Array.isArray(receipts)) continue; // null result = block has no receipts yet
+          for (const r of receipts) {
+            if (r.contractAddress && r.transactionHash) creations.push({ txHash: r.transactionHash, address: r.contractAddress });
+          }
+        }
+      }
+      return creations;
+    } catch { /* fall through to per-block */ }
+  }
+  try {
+    const creations = [];
+    for (let block = startBlock; block <= target; block += 1) {
+      const receipts = await jsonRpc('eth_getBlockReceipts', [`0x${block.toString(16)}`]);
+      if (Array.isArray(receipts)) {
+        for (const r of receipts) {
+          if (r.contractAddress && r.transactionHash) creations.push({ txHash: r.transactionHash, address: r.contractAddress });
+        }
+      }
+    }
+    return creations;
+  } catch { /* fall through to classic scan */ }
+  const creations = [];
+  for (let block = startBlock; block <= target; block += 1) {
+    const blockData = await jsonRpc('eth_getBlockByNumber', [`0x${block.toString(16)}`, true]);
+    if (blockData && Array.isArray(blockData.transactions)) {
+      for (const tx of blockData.transactions) {
+        if (tx.to !== null || !tx.hash) continue; // direct contract creations only
+        const receipt = await jsonRpc('eth_getTransactionReceipt', [tx.hash]);
+        if (receipt?.contractAddress) creations.push({ txHash: tx.hash, address: receipt.contractAddress });
+      }
+    }
+  }
+  return creations;
 }
 
 function rateCapStatus(now = Date.now()) {
@@ -287,32 +346,8 @@ async function scanCycle() {
   const startBlock = state.cursorBlock + 1;
   const target = Math.min(latest, state.cursorBlock + MAX_BLOCKS_PER_CYCLE);
   let candidates = 0;
-  for (let block = startBlock; block <= target; block += 1) {
-    // Preferred: one eth_getBlockReceipts call per block — catches direct
-    // creations AND factory deployments, and is far cheaper than per-tx
-    // receipt lookups. Falls back to the classic full-block scan if the RPC
-    // doesn't support it.
-    let creations = null;
-    try {
-      const receipts = await jsonRpc('eth_getBlockReceipts', [`0x${block.toString(16)}`]);
-      if (Array.isArray(receipts)) {
-        creations = receipts
-          .filter((r) => r.contractAddress && r.transactionHash)
-          .map((r) => ({ txHash: r.transactionHash, address: r.contractAddress }));
-      }
-    } catch { /* fall through to block scan */ }
-    if (creations === null) {
-      const blockData = await jsonRpc('eth_getBlockByNumber', [`0x${block.toString(16)}`, true]);
-      creations = [];
-      if (blockData && Array.isArray(blockData.transactions)) {
-        for (const tx of blockData.transactions) {
-          if (tx.to !== null || !tx.hash) continue; // direct contract creations only
-          const receipt = await jsonRpc('eth_getTransactionReceipt', [tx.hash]);
-          if (receipt?.contractAddress) creations.push({ txHash: tx.hash, address: receipt.contractAddress });
-        }
-      }
-    }
-    for (const { txHash, address } of creations) {
+  const creations = await fetchCreations(startBlock, target);
+  for (const { txHash, address } of creations) {
       if (state.seen[address]) continue;
       state.seen[address] = txHash;
       state.stats.contractsSeen += 1;
@@ -350,7 +385,6 @@ async function scanCycle() {
           state.filings.push({ at: new Date().toISOString(), address, reportId: result.reportId ?? null, dryRun: Boolean(result.dryRun) });
         }
       }
-    }
   }
   state.cursorBlock = target;
   saveState();

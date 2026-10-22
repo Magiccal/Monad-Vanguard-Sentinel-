@@ -144,6 +144,7 @@ function applyConfig() {
     RPC_URL = cfg.rpcUrl;
   }
   if (Number.isFinite(cfg.maxBlocksPerCycle) && cfg.maxBlocksPerCycle > 0) MAX_BLOCKS_PER_CYCLE = Math.floor(cfg.maxBlocksPerCycle);
+  if (Number.isFinite(cfg.blockBatchSize) && cfg.blockBatchSize > 0) BLOCK_BATCH_SIZE = Math.floor(cfg.blockBatchSize);
   if (Number.isFinite(cfg.lagJumpBlocks) && cfg.lagJumpBlocks > 0) LAG_JUMP_BLOCKS = Math.floor(cfg.lagJumpBlocks);
   if (Array.isArray(cfg.watchlist) && cfg.watchlist.length) watchlist = cfg.watchlist.map((b) => String(b).toLowerCase());
   if (DRY_RUN !== lastLoggedDryRun) {
@@ -155,7 +156,7 @@ const STATE_FILE = resolve(ENV.SCOUT_STATE_FILE || 'scout-state.json');
 const KILL_FILE = resolve(ENV.SCOUT_KILL_FILE || 'scout-paused.flag');
 const DRY_RUN_LOG = resolve(ENV.SCOUT_DRY_RUN_LOG || 'scout-dry-run.log');
 const WATCHLIST_FILE = resolve(ENV.SCOUT_WATCHLIST_FILE || 'impersonation-watchlist.json');
-const BLOCK_BATCH_SIZE = Number(ENV.SCOUT_BLOCK_BATCH_SIZE || 50);
+let BLOCK_BATCH_SIZE = Number(ENV.SCOUT_BLOCK_BATCH_SIZE || 50);
 const LAG_JUMP_TAIL = Number(ENV.SCOUT_LAG_JUMP_TAIL || 10);
 // The public RPC only serves eth_getBlockReceipts for a recent window
 // (measured: blocks ~300+ behind the tip start returning null). Never scan

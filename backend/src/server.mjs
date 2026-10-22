@@ -361,6 +361,25 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
         }
         const reviewer = authenticatedReviewer(req);
         if (!reviewer) throw new DomainError(401, 'unauthorized', 'Reviewer bearer token required');
+        if (segments[2] === 'ops' && segments[3] === 'scout' && req.method === 'GET') {
+          // Reviewer-only visibility into the co-hosted scout (Ollie's planted-
+          // test dry-run): current state (cursor, stats, filings) plus the tail
+          // of the dry-run log. Paths mirror maybeAutostartScout() — the runtime
+          // files live beside the relocated data file, so missing files simply
+          // mean "scout not running here".
+          const statePath = resolve(dirname(resolveDataFile()), 'scout-state.json');
+          const logPath = resolve(dirname(resolveDataFile()), 'scout-dry-run.log');
+          let scoutState = null;
+          if (existsSync(statePath)) {
+            try { scoutState = JSON.parse(readFileSync(statePath, 'utf8')); } catch { scoutState = { error: 'state file unreadable' }; }
+          }
+          let dryRunLog = null;
+          if (existsSync(logPath)) {
+            const raw = readFileSync(logPath, 'utf8');
+            dryRunLog = raw.length > 20000 ? `…${raw.slice(-20000)}` : raw;
+          }
+          return respond(res, 200, { configured: existsSync(resolve(dirname(fileURLToPath(import.meta.url)), '..', 'scout-autostart.flag')), scoutState, dryRunLog });
+        }
         if (segments[2] === 'notifications' && segments[3] === 'outbox' && req.method === 'GET' && segments.length === 4) {
           return respond(res, 200, { events: mvp.listNotificationEvents(reviewer.id) });
         }
@@ -426,8 +445,7 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
           (segments.length === 4 && req.method === 'POST'));
       const outboxRoute = req.method === 'GET' && pathname === '/v1/notifications/outbox';
       const contributorRoute = req.method === 'GET' && pathname === '/v1/contributors';
-      const scoutOpsRoute = req.method === 'GET' && pathname === '/v1/ops/scout';
-      const isReviewRoute = reportRoute || watchRoute || outboxRoute || contributorRoute || scoutOpsRoute;
+      const isReviewRoute = reportRoute || watchRoute || outboxRoute || contributorRoute;
       if (!isReviewRoute) throw new DomainError(404, 'not_found', 'Route not found');
       const reviewer = authenticatedReviewer(req);
       if (!reviewer) {
@@ -435,25 +453,6 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
       }
       const actingReviewerId = reviewer.id;
 
-      if (scoutOpsRoute) {
-        // Reviewer-only visibility into the co-hosted scout (Ollie's planted-
-        // test dry-run): current state (cursor, stats, filings) plus the tail
-        // of the dry-run log. Paths mirror maybeAutostartScout() — the runtime
-        // files live beside the relocated data file, so missing files simply
-        // mean "scout not running here".
-        const statePath = resolve(dirname(resolveDataFile()), 'scout-state.json');
-        const logPath = resolve(dirname(resolveDataFile()), 'scout-dry-run.log');
-        let scoutState = null;
-        if (existsSync(statePath)) {
-          try { scoutState = JSON.parse(readFileSync(statePath, 'utf8')); } catch { scoutState = { error: 'state file unreadable' }; }
-        }
-        let dryRunLog = null;
-        if (existsSync(logPath)) {
-          const raw = readFileSync(logPath, 'utf8');
-          dryRunLog = raw.length > 20000 ? `…${raw.slice(-20000)}` : raw;
-        }
-        return respond(res, 200, { configured: existsSync(resolve(dirname(fileURLToPath(import.meta.url)), '..', 'scout-autostart.flag')), scoutState, dryRunLog });
-      }
       if (outboxRoute) return respond(res, 200, { events: sentinel.listNotificationEvents() });
       if (contributorRoute) return respond(res, 200, { contributors: sentinel.listContributors() });
       if (watchRoute) {

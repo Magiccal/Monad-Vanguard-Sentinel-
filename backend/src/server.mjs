@@ -425,7 +425,8 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
           (segments.length === 4 && req.method === 'POST'));
       const outboxRoute = req.method === 'GET' && pathname === '/v1/notifications/outbox';
       const contributorRoute = req.method === 'GET' && pathname === '/v1/contributors';
-      const isReviewRoute = reportRoute || watchRoute || outboxRoute || contributorRoute;
+      const scoutOpsRoute = req.method === 'GET' && pathname === '/v1/ops/scout';
+      const isReviewRoute = reportRoute || watchRoute || outboxRoute || contributorRoute || scoutOpsRoute;
       if (!isReviewRoute) throw new DomainError(404, 'not_found', 'Route not found');
       const reviewer = authenticatedReviewer(req);
       if (!reviewer) {
@@ -433,6 +434,24 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
       }
       const actingReviewerId = reviewer.id;
 
+      if (scoutOpsRoute) {
+        // Reviewer-only visibility into the hosted scout (Ollie's planted-test
+        // dry-run): current state (cursor, stats, filings) plus the tail of the
+        // dry-run log. Paths come from env so this works wherever the scout is
+        // co-hosted; missing files simply mean "scout not running here".
+        const statePath = process.env.SCOUT_STATE_FILE || null;
+        const logPath = process.env.SCOUT_DRY_RUN_LOG || null;
+        let scoutState = null;
+        if (statePath && existsSync(statePath)) {
+          try { scoutState = JSON.parse(readFileSync(statePath, 'utf8')); } catch { scoutState = { error: 'state file unreadable' }; }
+        }
+        let dryRunLog = null;
+        if (logPath && existsSync(logPath)) {
+          const raw = readFileSync(logPath, 'utf8');
+          dryRunLog = raw.length > 20000 ? `…${raw.slice(-20000)}` : raw;
+        }
+        return respond(res, 200, { configured: Boolean(statePath), scoutState, dryRunLog });
+      }
       if (outboxRoute) return respond(res, 200, { events: sentinel.listNotificationEvents() });
       if (contributorRoute) return respond(res, 200, { contributors: sentinel.listContributors() });
       if (watchRoute) {

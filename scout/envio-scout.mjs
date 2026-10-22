@@ -357,7 +357,7 @@ function buildPayload(candidate) {
     description:
       `Possible impersonation of ${candidate.brand}: token "${candidate.symbol}" (name "${candidate.name}") ` +
       `deployed on Monad testnet at contract ${candidate.address} in transaction ${candidate.txHash}. ` +
-      `Signals: (1) watchlist name match on the ${candidate.matchWhere}; (2) honeypot-style control function ` +
+      `Signals: (1) watchlist name match on the ${candidate.where}; (2) honeypot-style control function ` +
       `"${candidate.honeypotFn}" present in the bytecode. Filed as an automated lead for human review — ` +
       `this is a possible impersonation, not a confirmed verdict.`,
     targets: [{ kind: 'address', value: candidate.address }],

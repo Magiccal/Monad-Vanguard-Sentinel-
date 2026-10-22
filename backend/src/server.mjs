@@ -2,9 +2,10 @@ import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { BlockList, isIP } from 'node:net';
 import { basename, dirname, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { createSentinel, DomainError } from './core.mjs';
 import { createMvpService, DISCLAIMER } from './mvp.mjs';
 import { Store } from './store.mjs';
@@ -435,22 +436,23 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
       const actingReviewerId = reviewer.id;
 
       if (scoutOpsRoute) {
-        // Reviewer-only visibility into the hosted scout (Ollie's planted-test
-        // dry-run): current state (cursor, stats, filings) plus the tail of the
-        // dry-run log. Paths come from env so this works wherever the scout is
-        // co-hosted; missing files simply mean "scout not running here".
-        const statePath = process.env.SCOUT_STATE_FILE || null;
-        const logPath = process.env.SCOUT_DRY_RUN_LOG || null;
+        // Reviewer-only visibility into the co-hosted scout (Ollie's planted-
+        // test dry-run): current state (cursor, stats, filings) plus the tail
+        // of the dry-run log. Paths mirror maybeAutostartScout() — the runtime
+        // files live beside the relocated data file, so missing files simply
+        // mean "scout not running here".
+        const statePath = resolve(dirname(resolveDataFile()), 'scout-state.json');
+        const logPath = resolve(dirname(resolveDataFile()), 'scout-dry-run.log');
         let scoutState = null;
-        if (statePath && existsSync(statePath)) {
+        if (existsSync(statePath)) {
           try { scoutState = JSON.parse(readFileSync(statePath, 'utf8')); } catch { scoutState = { error: 'state file unreadable' }; }
         }
         let dryRunLog = null;
-        if (logPath && existsSync(logPath)) {
+        if (existsSync(logPath)) {
           const raw = readFileSync(logPath, 'utf8');
           dryRunLog = raw.length > 20000 ? `…${raw.slice(-20000)}` : raw;
         }
-        return respond(res, 200, { configured: Boolean(statePath), scoutState, dryRunLog });
+        return respond(res, 200, { configured: existsSync(resolve(dirname(fileURLToPath(import.meta.url)), '..', 'scout-autostart.flag')), scoutState, dryRunLog });
       }
       if (outboxRoute) return respond(res, 200, { events: sentinel.listNotificationEvents() });
       if (contributorRoute) return respond(res, 200, { contributors: sentinel.listContributors() });
@@ -573,7 +575,58 @@ async function main() {
   const host = process.env.HOST || '127.0.0.1';
   server.listen(port, host, () => {
     console.log(`Sentinel backend demo listening at http://${host}:${port}`);
+    maybeAutostartScout(file);
   });
+}
+
+// Co-host the Envio Scout as a child process (Ollie 22:04: the scout must live
+// on the always-on box, not the laptop). Triggered purely by the presence of a
+// scout-autostart.flag file next to the server entry — files propagate through
+// redeploys while process env is frozen, and the runtime files live in the
+// sentinel-live-data directory so redeploys never wipe scout state or the
+// dry-run log. A stale scout from a previous backend run is killed first so
+// only one instance ever runs.
+function maybeAutostartScout(dataFile) {
+  const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const flagPath = resolve(rootDir, 'scout-autostart.flag');
+  if (!existsSync(flagPath)) return;
+  const script = resolve(rootDir, 'scout', 'envio-scout.mjs');
+  if (!existsSync(script)) {
+    console.log('[sentinel] scout autostart: flag present but scout/envio-scout.mjs missing — skipping');
+    return;
+  }
+  const liveDir = dirname(dataFile); // resolveDataFile() already relocated it outside the deployment dir
+  const stateFile = resolve(liveDir, 'scout-state.json');
+  const dryRunLog = resolve(liveDir, 'scout-dry-run.log');
+  const killFile = resolve(liveDir, 'scout-paused.flag');
+  const pidFile = resolve(liveDir, 'scout.pid');
+  try {
+    const stale = Number(readFileSync(pidFile, 'utf8').trim());
+    if (Number.isSafeInteger(stale) && stale > 1) {
+      process.kill(stale, 0);
+      process.kill(stale);
+      console.log(`[sentinel] scout autostart: killed stale scout pid ${stale}`);
+    }
+  } catch { /* stale pid already gone or pidfile unreadable — nothing to kill */ }
+  let agentToken = '';
+  try {
+    const agents = JSON.parse(process.env.AGENTS_JSON || '[]');
+    agentToken = agents.find((a) => a.id === 'envio-scout')?.token ?? agents[0]?.token ?? '';
+  } catch { /* no agents configured — scout runs in dry-run without filing */ }
+  const child = spawn(process.execPath, [script], {
+    cwd: rootDir, // scout.config.json is resolved relative to here
+    env: {
+      ...process.env,
+      SENTINEL_TOKEN: agentToken,
+      SCOUT_STATE_FILE: stateFile,
+      SCOUT_DRY_RUN_LOG: dryRunLog,
+      SCOUT_KILL_FILE: killFile,
+    },
+    stdio: 'ignore',
+  });
+  try { writeFileSync(pidFile, String(child.pid)); } catch { /* pidfile best-effort */ }
+  child.unref();
+  console.log(`[sentinel] scout autostart: pid ${child.pid} state=${stateFile} log=${dryRunLog}`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

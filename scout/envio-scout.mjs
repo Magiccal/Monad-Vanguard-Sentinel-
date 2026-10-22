@@ -113,15 +113,40 @@ if (selfTest !== 'a9059cbb2ab09eb219583f4a59a5d0623ade346d962bcd4e46b11da047c904
 const ENV = process.env;
 const RPC_URL = ENV.MONAD_RPC_URL || 'https://testnet-rpc.monad.xyz';
 const BASE_URL = (ENV.SENTINEL_BASE_URL || 'https://sentinel-security-demo.app.workbuddy.host').replace(/\/$/, '');
-const TOKEN = ENV.SENTINEL_TOKEN || '';
-const DRY_RUN = (ENV.DRY_RUN ?? 'true') !== 'false';
-const POLL_SECONDS = Number(ENV.POLL_SECONDS || 60);
+// Volatile settings live in scout.config.json (re-read every cycle) so a
+// dry-run → real-mode flip is a file edit, not a process restart — required on
+// hosts where the process env is frozen at first boot. Precedence:
+// config file > env > built-in default.
+const CONFIG_FILE = resolve(ENV.SCOUT_CONFIG_FILE || 'scout.config.json');
+let TOKEN = ENV.SENTINEL_TOKEN || '';
+let DRY_RUN = (ENV.DRY_RUN ?? 'true') !== 'false';
+let POLL_SECONDS = Number(ENV.POLL_SECONDS || 60);
+let MAX_PER_24H = Number(ENV.SCOUT_MAX_PER_24H || 3);
+let MIN_SPACING_MS = Number(ENV.SCOUT_MIN_SPACING_H || 2) * 3600_000;
+let lastLoggedDryRun = DRY_RUN;
+
+function applyConfig() {
+  if (!existsSync(CONFIG_FILE)) return;
+  let cfg;
+  try { cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')); } catch {
+    log('warning: scout.config.json unreadable — keeping current settings');
+    return;
+  }
+  if (typeof cfg.dryRun === 'boolean') DRY_RUN = cfg.dryRun;
+  if (typeof cfg.token === 'string' && cfg.token) TOKEN = cfg.token;
+  if (Number.isFinite(cfg.maxPer24h) && cfg.maxPer24h > 0) MAX_PER_24H = Math.floor(cfg.maxPer24h);
+  if (Number.isFinite(cfg.minSpacingH) && cfg.minSpacingH >= 0) MIN_SPACING_MS = cfg.minSpacingH * 3600_000;
+  if (Number.isFinite(cfg.pollSeconds) && cfg.pollSeconds >= 5) POLL_SECONDS = Math.floor(cfg.pollSeconds);
+  if (Array.isArray(cfg.watchlist) && cfg.watchlist.length) watchlist = cfg.watchlist.map((b) => String(b).toLowerCase());
+  if (DRY_RUN !== lastLoggedDryRun) {
+    log(`MODE FLIP via ${CONFIG_FILE}: dryRun=${DRY_RUN}${DRY_RUN ? '' : ' (real filing armed — kill switch and caps still apply)'}`);
+    lastLoggedDryRun = DRY_RUN;
+  }
+}
 const STATE_FILE = resolve(ENV.SCOUT_STATE_FILE || 'scout-state.json');
 const KILL_FILE = resolve(ENV.SCOUT_KILL_FILE || 'scout-paused.flag');
 const DRY_RUN_LOG = resolve(ENV.SCOUT_DRY_RUN_LOG || 'scout-dry-run.log');
 const WATCHLIST_FILE = resolve(ENV.SCOUT_WATCHLIST_FILE || 'impersonation-watchlist.json');
-const MAX_PER_24H = Number(ENV.SCOUT_MAX_PER_24H || 3);
-const MIN_SPACING_MS = Number(ENV.SCOUT_MIN_SPACING_H || 2) * 3600_000;
 const MAX_BLOCKS_PER_CYCLE = Number(ENV.SCOUT_MAX_BLOCKS_PER_CYCLE || 400);
 const BLOCK_BATCH_SIZE = Number(ENV.SCOUT_BLOCK_BATCH_SIZE || 50);
 const LAG_JUMP_BLOCKS = Number(ENV.SCOUT_LAG_JUMP_BLOCKS || 800);
@@ -336,6 +361,12 @@ async function fileReport(candidate) {
     log(`DRY-RUN: would file for ${candidate.address} (brand ${candidate.brand}); payload appended to ${DRY_RUN_LOG}`);
     return { dryRun: true };
   }
+  if (!TOKEN) {
+    // Config flipped to real mode but no token configured — never crash the
+    // loop over it; log loudly and treat as blocked.
+    log(`REAL MODE but no token configured (scout.config.json or SENTINEL_TOKEN) — candidate ${candidate.address} NOT filed`);
+    return { ok: false, blockedBy: 'missing_token' };
+  }
   const response = await fetch(`${BASE_URL}/v1/agents/reports`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-sentinel-token': TOKEN },
@@ -442,16 +473,16 @@ function pruneState() {
 }
 
 async function main() {
-  log(`envio-scout starting: dryRun=${DRY_RUN} rpc=${RPC_URL} base=${BASE_URL} poll=${POLL_SECONDS}s killFile=${KILL_FILE}`);
+  applyConfig();
+  log(`envio-scout starting: dryRun=${DRY_RUN} rpc=${RPC_URL} base=${BASE_URL} poll=${POLL_SECONDS}s killFile=${KILL_FILE} config=${CONFIG_FILE}`);
   log(`watchlist: ${watchlist.join(', ')}`);
-  if (!DRY_RUN && !TOKEN) {
-    console.error('[scout] real mode requires SENTINEL_TOKEN — refusing to start');
-    process.exit(1);
-  }
   mkdirSync(resolve(STATE_FILE, '..'), { recursive: true });
-  const seconds = Number.isFinite(POLL_SECONDS) && POLL_SECONDS >= 5 ? POLL_SECONDS : 60;
   for (;;) {
     try {
+      applyConfig();
+      if (!DRY_RUN && !TOKEN) {
+        log('real mode active but no token configured — cycles continue in observe-only until a token appears in scout.config.json');
+      }
       if (killSwitchPresent()) {
         log(`kill switch present (${KILL_FILE}) — scout paused; remove the file to resume`);
       } else {
@@ -461,6 +492,7 @@ async function main() {
     } catch (error) {
       log(`cycle error: ${error.message?.slice(0, 300)}`);
     }
+    const seconds = Number.isFinite(POLL_SECONDS) && POLL_SECONDS >= 5 ? POLL_SECONDS : 60;
     await new Promise((r) => setTimeout(r, seconds * 1000));
   }
 }

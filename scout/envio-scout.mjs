@@ -111,7 +111,7 @@ if (selfTest !== 'a9059cbb2ab09eb219583f4a59a5d0623ade346d962bcd4e46b11da047c904
 }
 
 const ENV = process.env;
-const RPC_URL = ENV.MONAD_RPC_URL || 'https://testnet-rpc.monad.xyz';
+let RPC_URL = ENV.MONAD_RPC_URL || 'https://testnet-rpc.monad.xyz';
 const BASE_URL = (ENV.SENTINEL_BASE_URL || 'https://sentinel-security-demo.app.workbuddy.host').replace(/\/$/, '');
 // Volatile settings live in scout.config.json (re-read every cycle) so a
 // dry-run → real-mode flip is a file edit, not a process restart — required on
@@ -123,6 +123,8 @@ let DRY_RUN = (ENV.DRY_RUN ?? 'true') !== 'false';
 let POLL_SECONDS = Number(ENV.POLL_SECONDS || 60);
 let MAX_PER_24H = Number(ENV.SCOUT_MAX_PER_24H || 3);
 let MIN_SPACING_MS = Number(ENV.SCOUT_MIN_SPACING_H || 2) * 3600_000;
+let MAX_BLOCKS_PER_CYCLE = Number(ENV.SCOUT_MAX_BLOCKS_PER_CYCLE || 400);
+let LAG_JUMP_BLOCKS = Number(ENV.SCOUT_LAG_JUMP_BLOCKS || 800);
 let lastLoggedDryRun = DRY_RUN;
 
 function applyConfig() {
@@ -137,6 +139,12 @@ function applyConfig() {
   if (Number.isFinite(cfg.maxPer24h) && cfg.maxPer24h > 0) MAX_PER_24H = Math.floor(cfg.maxPer24h);
   if (Number.isFinite(cfg.minSpacingH) && cfg.minSpacingH >= 0) MIN_SPACING_MS = cfg.minSpacingH * 3600_000;
   if (Number.isFinite(cfg.pollSeconds) && cfg.pollSeconds >= 5) POLL_SECONDS = Math.floor(cfg.pollSeconds);
+  if (typeof cfg.rpcUrl === 'string' && cfg.rpcUrl.startsWith('http')) {
+    if (cfg.rpcUrl !== RPC_URL) log(`rpc url changed via config: ${cfg.rpcUrl}`);
+    RPC_URL = cfg.rpcUrl;
+  }
+  if (Number.isFinite(cfg.maxBlocksPerCycle) && cfg.maxBlocksPerCycle > 0) MAX_BLOCKS_PER_CYCLE = Math.floor(cfg.maxBlocksPerCycle);
+  if (Number.isFinite(cfg.lagJumpBlocks) && cfg.lagJumpBlocks > 0) LAG_JUMP_BLOCKS = Math.floor(cfg.lagJumpBlocks);
   if (Array.isArray(cfg.watchlist) && cfg.watchlist.length) watchlist = cfg.watchlist.map((b) => String(b).toLowerCase());
   if (DRY_RUN !== lastLoggedDryRun) {
     log(`MODE FLIP via ${CONFIG_FILE}: dryRun=${DRY_RUN}${DRY_RUN ? '' : ' (real filing armed — kill switch and caps still apply)'}`);
@@ -147,9 +155,7 @@ const STATE_FILE = resolve(ENV.SCOUT_STATE_FILE || 'scout-state.json');
 const KILL_FILE = resolve(ENV.SCOUT_KILL_FILE || 'scout-paused.flag');
 const DRY_RUN_LOG = resolve(ENV.SCOUT_DRY_RUN_LOG || 'scout-dry-run.log');
 const WATCHLIST_FILE = resolve(ENV.SCOUT_WATCHLIST_FILE || 'impersonation-watchlist.json');
-const MAX_BLOCKS_PER_CYCLE = Number(ENV.SCOUT_MAX_BLOCKS_PER_CYCLE || 400);
 const BLOCK_BATCH_SIZE = Number(ENV.SCOUT_BLOCK_BATCH_SIZE || 50);
-const LAG_JUMP_BLOCKS = Number(ENV.SCOUT_LAG_JUMP_BLOCKS || 800);
 const LAG_JUMP_TAIL = Number(ENV.SCOUT_LAG_JUMP_TAIL || 10);
 // The public RPC only serves eth_getBlockReceipts for a recent window
 // (measured: blocks ~300+ behind the tip start returning null). Never scan
@@ -226,6 +232,9 @@ async function postRpc(payload) {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
+    // Never let a slow/hung RPC stall a cycle for minutes (observed on the
+    // hosted box): every RPC call gets a hard 12s ceiling.
+    signal: AbortSignal.timeout(12_000),
   });
   return response.json();
 }
@@ -266,8 +275,12 @@ async function readContractString(address, selector, label) {
     const length = parseInt(data.slice(66, 130), 16);
     if (!Number.isFinite(length) || length <= 0 || length > 256) return null;
     return Buffer.from(data.slice(130, 130 + length * 2), 'hex').toString('utf8').replace(/\0+$/, '');
-  } catch {
-    return null; // not a token-like contract, or call reverted
+  } catch (error) {
+    // RPC failure / timeout is AMBIGUOUS (undefined) — the caller must not
+    // treat the contract as checked. Only a successful call resolves to a
+    // string or null (revert / not a token-like contract).
+    log(`eth_call ${label} failed for ${address}: ${error.message?.slice(0, 120)}`);
+    return undefined;
   }
 }
 
@@ -420,12 +433,16 @@ async function scanCycle() {
   }
   for (const { txHash, address } of creations) {
       if (state.seen[address]) continue;
-      state.seen[address] = txHash;
-      state.stats.contractsSeen += 1;
       const [symbol, name] = await Promise.all([
         readContractString(address, SELECTOR.symbol, 'symbol'),
         readContractString(address, SELECTOR.name, 'name'),
       ]);
+      // Ambiguous read (RPC failure/timeout): skip WITHOUT marking seen so the
+      // contract is re-checked next cycle. Burning it here would silently
+      // drop a real flag forever (observed on the hosted box).
+      if (symbol === undefined || name === undefined) continue;
+      state.seen[address] = txHash;
+      state.stats.contractsSeen += 1;
       if (!symbol && !name) continue;
       const impersonation = impersonationMatch(symbol, name);
       if (!impersonation) continue; // signal A gate first — cheap on candidates

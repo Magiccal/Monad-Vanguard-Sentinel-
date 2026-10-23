@@ -114,6 +114,15 @@ export const sentinelCommand = {
         { type: 3, name: 'reason', description: 'Why this proposal is rejected', required: true, min_length: 20, max_length: 1000 },
       ],
     },
+    {
+      type: 1,
+      name: 'dismiss',
+      description: 'Dismiss a report as a test or false alarm; it stays private (Reviewer role required)',
+      options: [
+        { type: 3, name: 'report_id', description: 'Private report ID, e.g. R-0006', required: true, max_length: 32 },
+        { type: 3, name: 'reason', description: 'Why this report is dismissed (private, 20+ characters)', required: true, min_length: 20, max_length: 1000 },
+      ],
+    },
   ],
 };
 

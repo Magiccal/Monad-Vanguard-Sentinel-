@@ -76,6 +76,12 @@ export const backend = {
   rejectProposal(proposalId, token, reason) {
     return call(`/v1/mvp/proposals/${encodeURIComponent(proposalId)}/rejection`, { method: 'POST', token, body: { reason } });
   },
+  // Dismiss body is a flat { reason } — mvp.dismissReport validates input as an
+  // object and reads input.reason directly (the 'dismissal' argument in its
+  // object(input, 'dismissal') call is only the error label, not a path).
+  dismissReport(reportId, token, reason) {
+    return call(`/v1/mvp/reports/${encodeURIComponent(reportId)}/dismiss`, { method: 'POST', token, body: { reason } });
+  },
 
   // The one-hour Lead fallback clock starts only on a confirmed delivery.
   confirmLeadNotification(proposalId, delivered) {

@@ -369,6 +369,10 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
           // mean "scout not running here".
           const statePath = resolve(dirname(resolveDataFile()), 'scout-state.json');
           const logPath = resolve(dirname(resolveDataFile()), 'scout-dry-run.log');
+          // The kill switch is the same file the spawned scout polls every cycle
+          // (SCOUT_KILL_FILE) — creating it pauses filings on the next check
+          // without a redeploy (Ollie 2026-10-23: instant stop is required during judging).
+          const killPath = resolve(dirname(resolveDataFile()), 'scout-paused.flag');
           let scoutState = null;
           if (existsSync(statePath)) {
             try { scoutState = JSON.parse(readFileSync(statePath, 'utf8')); } catch { scoutState = { error: 'state file unreadable' }; }
@@ -383,9 +387,28 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
             // Ollie 2026-10-23: disclose partial coverage everywhere the scout
             // is mentioned — this endpoint is the scout's live observability surface.
             coverageNote: 'Demo hosting: partial block coverage (5.0% of produced blocks observed over a 15h window on 2026-10-23) — platform egress stalls push the scanner past the RPC receipt window (~300 blocks); every skipped range is logged in scoutState.stats.skippedRanges. Detection verified end-to-end with planted contracts; proper hosting is the post-hackathon follow-up.',
+            paused: existsSync(killPath),
+            // Ollie 2026-10-23: rate-capped candidates are queued, not dropped —
+            // surface the queue depth here.
+            queuedFilings: Array.isArray(scoutState?.rateQueue) ? scoutState.rateQueue.length : 0,
             scoutState,
             dryRunLog,
           });
+        }
+        // Reviewer-gated instant pause/resume for the co-hosted scout: touch or
+        // remove the kill switch file the scout already checks every cycle and
+        // before every filing. Effective within one poll cycle — no redeploy.
+        if (segments[2] === 'ops' && segments[3] === 'scout' && segments[4] === 'pause' && req.method === 'POST' && segments.length === 5) {
+          const killPath = resolve(dirname(resolveDataFile()), 'scout-paused.flag');
+          writeFileSync(killPath, new Date().toISOString());
+          console.log(`[sentinel] scout pause via reviewer ${reviewer.id} at=${new Date().toISOString()}`);
+          return respond(res, 200, { paused: true, note: 'Kill switch created; the scout stops filing on its next check (no redeploy needed).' });
+        }
+        if (segments[2] === 'ops' && segments[3] === 'scout' && segments[4] === 'resume' && req.method === 'POST' && segments.length === 5) {
+          const killPath = resolve(dirname(resolveDataFile()), 'scout-paused.flag');
+          rmSync(killPath, { force: true });
+          console.log(`[sentinel] scout resume via reviewer ${reviewer.id} at=${new Date().toISOString()}`);
+          return respond(res, 200, { paused: false, note: 'Kill switch removed; the scout resumes on its next cycle.' });
         }
         if (segments[2] === 'notifications' && segments[3] === 'outbox' && req.method === 'GET' && segments.length === 4) {
           return respond(res, 200, { events: mvp.listNotificationEvents(reviewer.id) });

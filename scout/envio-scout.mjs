@@ -191,6 +191,11 @@ let state = {
   cursorBlock: null,
   seen: {},
   filings: [],
+  // Ollie 2026-10-23: rate-capped candidates wait here instead of being
+  // dropped — a real scam arriving within the 2h spacing of another filing
+  // must still be reported once spacing allows (still bounded by MAX_PER_24H).
+  // Entries are the full candidate (all strings) + blockedAt; drained FIFO.
+  rateQueue: [],
   // Chain tip observed on the very first cycle of a run — the denominator
   // anchor for the daily coverage number in the dry-run report.
   firstCycleTip: null,
@@ -396,6 +401,28 @@ async function fileReport(candidate) {
   return { ok: true, reportId: body.id };
 }
 
+// Ollie 2026-10-23: file rate-capped candidates once spacing allows (FIFO).
+// Still bounded by MAX_PER_24H via rateCapStatus; the kill switch pauses the
+// drain too — an instant stop always wins over queued work.
+async function drainRateQueue() {
+  if (killSwitchPresent()) return;
+  while (state.rateQueue.length > 0) {
+    const rate = rateCapStatus();
+    if (!rate.allowed) break; // spacing/count still blocking — retry next cycle
+    const candidate = state.rateQueue[0];
+    const result = await fileReport(candidate);
+    if (result.ok || result.dryRun) {
+      state.filings.push({ at: new Date().toISOString(), address: candidate.address, reportId: result.reportId ?? null, dryRun: Boolean(result.dryRun), queued: true });
+      state.rateQueue.shift();
+      log(`queued filing drained: ${candidate.address}${result.reportId ? ` as ${result.reportId}` : ' (dry-run payload)'} — ${state.rateQueue.length} still queued`);
+    } else {
+      // Network/HTTP failure — keep it queued and retry next cycle.
+      log(`queued filing for ${candidate.address} failed; kept in queue for next cycle`);
+      break;
+    }
+  }
+}
+
 async function scanCycle() {
   const latest = Number(await jsonRpc('eth_blockNumber', []));
   if (state.firstCycleTip === null || state.firstCycleTip === undefined) {
@@ -421,6 +448,9 @@ async function scanCycle() {
     state.cursorBlock = skippedTo;
     saveState();
   }
+  // Drain rate-capped filings before scanning — spacing may have elapsed
+  // since they were queued (Ollie 2026-10-23: queue, never drop).
+  await drainRateQueue();
   const startBlock = state.cursorBlock + 1;
   // Receipts are only available inside a recent window — cap the scan tip so
   // every block we mark scanned actually had its receipts read.
@@ -466,8 +496,15 @@ async function scanCycle() {
         log(`kill switch present — candidate ${address} logged but not filed`);
         state.filings.push({ at: new Date().toISOString(), address, blockedBy: 'kill_switch' });
       } else if (!rate.allowed) {
-        log(`rate cap (${rate.count}/${MAX_PER_24H} in 24h, spacingOk=${rate.spacingOk}) — candidate ${address} logged but not filed`);
-        state.filings.push({ at: new Date().toISOString(), address, blockedBy: 'rate_cap' });
+        // Ollie 2026-10-23: queue instead of dropping. The address is already
+        // in state.seen (evaluation precedes any filing decision), so without
+        // a queue this candidate would never be reported.
+        state.rateQueue.push({ ...candidate, blockedAt: new Date().toISOString() });
+        if (state.rateQueue.length > 50) {
+          const dropped = state.rateQueue.shift();
+          log(`rate queue full (50) — dropped oldest queued candidate ${dropped.address} (blockedAt ${dropped.blockedAt})`);
+        }
+        log(`rate cap (${rate.count}/${MAX_PER_24H} in 24h, spacingOk=${rate.spacingOk}) — candidate ${address} queued (${state.rateQueue.length} queued)`);
       } else {
         const result = await fileReport(candidate);
         if (result.ok || result.dryRun) {
@@ -480,7 +517,7 @@ async function scanCycle() {
   saveState();
   const produced = Math.max(0, latest - state.firstCycleTip);
   const skippedTotal = state.stats.skippedRanges.reduce((sum, r) => sum + r.blocks, 0);
-  log(`cycle done: blocks ${startBlock}..${target} scanned, ${candidates} candidate(s), ${Object.keys(state.seen).length} contracts seen | coverage: scanned=${state.stats.blocksScanned} produced=${produced} skipped=${skippedTotal} nullReceipts=${state.stats.receiptUnavailable} since ${state.startedAt}`);
+  log(`cycle done: blocks ${startBlock}..${target} scanned, ${candidates} candidate(s), ${Object.keys(state.seen).length} contracts seen, ${state.rateQueue.length} queued | coverage: scanned=${state.stats.blocksScanned} produced=${produced} skipped=${skippedTotal} nullReceipts=${state.stats.receiptUnavailable} since ${state.startedAt}`);
 }
 
 function pruneState() {

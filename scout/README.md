@@ -24,7 +24,7 @@ registered `envio-scout` agent. **It never publishes** — everything files as
 | --- | --- | --- |
 | `DRY_RUN` (env, **default `true`**) | `DRY_RUN=false` to file for real | Dry run appends the full payload it *would* file to `scout-dry-run.log` and sends nothing. |
 | Kill switch | `scout-paused.flag` next to the state file (path via `SCOUT_KILL_FILE`) | If the file exists the scout pauses immediately — no filing, checked every cycle and again before any send. `touch` to stop, remove to resume. No redeploy needed. |
-| Rate caps | self-capped at 3 filings / rolling 24h, ≥2h spacing | Logged candidates that hit the cap are recorded in state but not sent. |
+| Rate caps | self-capped at 3 filings / rolling 24h, ≥2h spacing | Candidates that hit the cap are **queued** in state (`rateQueue`, capped at 50, FIFO) and filed automatically once spacing allows — still bounded by 3/24h. Queue depth is visible via `GET /v1/mvp/ops/scout` (`queuedFilings`) and in the `cycle done` log. |
 | Per-filing log | console line | `FILED status=201 report=R-#### contract=0x… signals=impersonation+honeypot(...) brand=…` — never logs the token. |
 
 ## Coverage status (demo hosting disclosure)

@@ -33,7 +33,7 @@ verify Discord interaction signatures itself.
    and posts each ID once to the configured private `#reviewers` channel. It never posts
    the reporter identity, description, target, or raw evidence URL. Delivery is marked in
    the backend after Discord accepts the message, so a bot restart does not repost notices.
-8. **Reviewer commands** — `/sentinel queue`, `open`, `propose`, `approve`, and `reject`
+8. **Reviewer commands** — `/sentinel queue`, `open`, `propose`, `approve`, `reject`, and `dismiss`
    require both the configured Discord Reviewer role and a server-side mapping from the
    caller's Discord ID to that reviewer's own backend token. Replies are ephemeral. `open`
    shows private report details only to the invoking reviewer, with evidence numbered for

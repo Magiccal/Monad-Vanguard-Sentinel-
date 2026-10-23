@@ -73,7 +73,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 async function handleSentinel(interaction) {
   const subcommand = interaction.options.getSubcommand();
   const reporterId = interaction.user.id;
-  if (['queue', 'open', 'propose', 'approve', 'reject'].includes(subcommand)) {
+  if (['queue', 'open', 'propose', 'approve', 'reject', 'dismiss'].includes(subcommand)) {
     const reviewer = reviewerIdentity(interaction);
     if (!reviewer) {
       await interaction.reply({
@@ -232,6 +232,18 @@ async function handleReviewerCommand(interaction, subcommand, reviewer) {
     const result = await backend.rejectProposal(proposalId, reviewer.token, reason);
     await interaction.editReply({
       content: `Proposal **${result.id}**: **${result.status}**. The source report remains private and may be proposed again after revision.`,
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+
+  if (subcommand === 'dismiss') {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const reportId = interaction.options.getString('report_id', true).toUpperCase();
+    const reason = interaction.options.getString('reason', true);
+    const result = await backend.dismissReport(reportId, reviewer.token, reason);
+    await interaction.editReply({
+      content: `Report **${result.id}**: **${result.status}** (dismissed ${result.dismissedAt}). It stays private and out of the queue.`,
       allowedMentions: { parse: [] },
     });
   }

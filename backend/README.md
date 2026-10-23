@@ -44,6 +44,8 @@ MVP endpoints:
 | `GET /v1/discord/reviewer-alerts`, `POST /v1/discord/reports/:id/reviewer-notification` | Trusted-bot feed of unannounced report IDs and durable delivery marker; no report text, reporter identity, or evidence links are returned. |
 | `GET /v1/mvp/reports`, `GET /v1/mvp/reports/:id` | Reviewer-only private report queue and details. |
 | `POST /v1/mvp/reports/:id/triage`, `/merge` | One-reviewer triage or duplicate merge. |
+| `POST /v1/mvp/reports/:id/dismiss` | Reviewer-only dismissal (body `{ "reason": "..." }`, 20–1000 chars); the report stays private and leaves the open queue. |
+| `GET /v1/mvp/ops/scout`, `POST /v1/mvp/ops/scout/pause`, `/resume` | Reviewer-only scout observability and kill-switch control: GET returns scout state/dry-run log plus `paused`; pause/resume touch or remove the kill-switch file the scout checks every cycle, taking effect without a redeploy. |
 | `POST /v1/mvp/reports/:id/publication` | Propose first incident and cast the proposing reviewer's vote. |
 | `POST /v1/mvp/incidents/:id/publication` | Propose a new version of a published incident. |
 | `GET /v1/mvp/proposals/:id`, `POST /v1/mvp/proposals/:id/approval`, `/rejection`, `/evaluate`, `/cancel` | Private proposal audit, authenticated reviewer approval, rejection with an audit reason, clock re-evaluation, and Lead cancellation of a pending proposal. Any one reviewer may reject a draft proposal; it does not publish or expose the source report, which may be proposed again after revision. |

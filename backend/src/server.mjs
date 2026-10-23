@@ -378,7 +378,14 @@ export function createApiServer({ sentinel, reviewerToken, reviewerId, reviewers
             const raw = readFileSync(logPath, 'utf8');
             dryRunLog = raw.length > 20000 ? `…${raw.slice(-20000)}` : raw;
           }
-          return respond(res, 200, { configured: existsSync(resolve(dirname(fileURLToPath(import.meta.url)), '..', 'scout-autostart.flag')), scoutState, dryRunLog });
+          return respond(res, 200, {
+            configured: existsSync(resolve(dirname(fileURLToPath(import.meta.url)), '..', 'scout-autostart.flag')),
+            // Ollie 2026-10-23: disclose partial coverage everywhere the scout
+            // is mentioned — this endpoint is the scout's live observability surface.
+            coverageNote: 'Demo hosting: partial block coverage (5.0% of produced blocks observed over a 15h window on 2026-10-23) — platform egress stalls push the scanner past the RPC receipt window (~300 blocks); every skipped range is logged in scoutState.stats.skippedRanges. Detection verified end-to-end with planted contracts; proper hosting is the post-hackathon follow-up.',
+            scoutState,
+            dryRunLog,
+          });
         }
         if (segments[2] === 'notifications' && segments[3] === 'outbox' && req.method === 'GET' && segments.length === 4) {
           return respond(res, 200, { events: mvp.listNotificationEvents(reviewer.id) });

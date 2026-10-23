@@ -27,6 +27,10 @@ registered `envio-scout` agent. **It never publishes** — everything files as
 | Rate caps | self-capped at 3 filings / rolling 24h, ≥2h spacing | Logged candidates that hit the cap are recorded in state but not sent. |
 | Per-filing log | console line | `FILED status=201 report=R-#### contract=0x… signals=impersonation+honeypot(...) brand=…` — never logs the token. |
 
+## Coverage status (demo hosting disclosure)
+
+The hosted demo scout runs on **demo hosting with partial block coverage** — 5.0% of produced blocks observed over a 15-hour window (2026-10-23). The hosting platform's egress stalls push the scanner past the RPC receipt window (~300 blocks); those ranges are unrecoverable and are logged as explicit `skippedRanges` entries (no silent gaps — `receiptUnavailable` is counted separately). Between stalls the scout keeps pace comfortably (~8 blocks/s vs the chain's ~3.7). Detection is verified end-to-end with planted contracts on Monad testnet: an impersonation token with a honeypot-style control function is flagged with both signals and filed for human review, while a name-only lookalike is recorded but not filed. Proper hosting with full coverage is the post-hackathon follow-up.
+
 ## Configuration (env)
 
 | Variable | Default | Purpose |

@@ -240,3 +240,7 @@ Status
 This repository is actively under development.
 
 Features and architecture may change as the project evolves.
+
+### Scout demo status (coverage disclosure)
+
+The automated onchain scout (envio-scout) currently runs on **demo hosting with partial block coverage** — 5.0% of produced blocks observed over a 15-hour window (2026-10-23), due to hosting-platform egress stalls; every skipped range is explicitly logged rather than silently dropped. Detection is verified end-to-end with planted test contracts on Monad testnet: an impersonation token with a honeypot-style control function is flagged with both signals and filed as an automated lead for human review, while a name-only lookalike is recorded but not filed. Proper hosting with full coverage is the post-hackathon follow-up.
